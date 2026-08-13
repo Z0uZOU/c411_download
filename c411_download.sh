@@ -1,12 +1,8 @@
 #!/bin/bash
 
-
-daemon_destination="/mnt/sdc1/Downloads/_Transmission/"
-
 #######################
 ## Check if this script is running
 lock_file="/tmp/$(basename "$0").lock"
-
 exec 200>"$lock_file"
 
 if ! flock -n 200; then
@@ -26,7 +22,6 @@ script_remote="https://raw.githubusercontent.com/Z0uZOU/$script_name/main/$scrip
 script_cron_log=`echo "/var/log/"$script_name".log"`
 script_folder="$HOME/.config/$script_name"
 script_db_movies_log="$HOME/.config/$script_name/db_movies.log"
-script_db_series_log="$HOME/.config/$script_name/db_series.log"
 if [[ ! -d "$script_folder" ]]; then
   mkdir -p "$script_folder"
 fi
@@ -39,9 +34,6 @@ fi
 if [[ ! -f "$script_db_movies_log" ]]; then
   touch "$script_db_movies_log"
 fi
-#if [[ ! -f "$script_db_series_log" ]]; then
-#  touch "$script_db_series_log"
-#fi
 
 #######################
 ## Advanced command arguments
@@ -241,8 +233,7 @@ shift $((OPTIND-1)) # remove parsed options and args from $@ list
 
 #######################
 ## Script configuration
-settings_variables=( sudo c411_api_key transmission_login transmission_password transmission_ip transmission_port plex_sort_folder push_token_app push_target push_ignored )
-required_settings=( c411_api_key transmission_login transmission_password transmission_ip transmission_port )
+settings_variables=( sudo c411_api_key rss_movies_url transmission_login transmission_password transmission_ip transmission_port transmission_torrent_paused plex_sort_folder skip_list filebot_films filebot_films_H265 push_token_app push_target push_ignored )
 edit_conf=0
 mkdir -p "$(dirname "$script_conf")"
 touch "$script_conf"
@@ -261,7 +252,7 @@ source "$script_conf"
 
 
 #######################
-## Import missing values from Conky configuration
+## Import missing values
 conky_conf="$HOME/.conky/conky-nas.conf"
 if [[ -r "$conky_conf" ]]; then
   for variable in "${required_settings[@]}"; do
@@ -280,10 +271,57 @@ if [[ -r "$conky_conf" ]]; then
     fi
   done
 fi
+if [[ -z "${plex_sort_folder:-}" ]]; then
+  plex_sort_conf=$(find /home -type f -path "*/.config/plex_sort/plex_sort.conf" 2>/dev/null | head -n1)
+  if [[ -n "$plex_sort_conf" ]]; then
+    plex_sort_folder=$(dirname "$plex_sort_conf")
+    if grep -qE '^plex_sort_folder=' "$script_conf"; then
+      sed -i "s|^plex_sort_folder=.*|plex_sort_folder=\"$plex_sort_folder\"|" "$script_conf"
+    else
+      printf 'plex_sort_folder="%s"\n' "$plex_sort_folder" >> "$script_conf"
+    fi
+    echo "Configuration imported and saved: plex_sort_folder from $plex_sort_conf"
+  fi
+fi
+if [[ -r "$plex_sort_folder/plex_sort.conf" ]]; then
+  download_folder=$(sed -nE 's|^[[:space:]]*download_folder[[:space:]]*=[[:space:]]*"([^"]*)".*$|\1|p' "$plex_sort_folder/plex_sort.conf" | head -n1)
+fi
+if [[ -n "$download_folder" ]]; then
+  if [[ -z "${filebot_films:-}" || -z "${filebot_films_H265:-}" ]]; then
+    while IFS= read -r folder; do
+      folder_name_lower=${folder##*/}
+      folder_name_lower=${folder_name_lower,,}
+      [[ "$folder_name_lower" == *filebot* ]] || continue
+      [[ "$folder_name_lower" == *films* ]] || continue
+      if [[ "$folder_name_lower" == *h265* ]]; then
+        filebot_films_H265="$folder"
+      else
+        filebot_films="$folder"
+      fi
+    done < <(find "$download_folder" -mindepth 1 -maxdepth 1 -type d)
+    if [[ -n "${filebot_films:-}" ]]; then
+      if grep -qE '^filebot_films=' "$script_conf"; then
+        sed -i "s|^filebot_films=.*|filebot_films=\"$filebot_films\"|" "$script_conf"
+      else
+        printf 'filebot_films="%s"\n' "$filebot_films" >> "$script_conf"
+      fi
+      echo "Configuration imported and saved: filebot_films=$filebot_films"
+    fi
+    if [[ -n "${filebot_films_H265:-}" ]]; then
+      if grep -qE '^filebot_films_H265=' "$script_conf"; then
+        sed -i "s|^filebot_films_H265=.*|filebot_films_H265=\"$filebot_films_H265\"|" "$script_conf"
+      else
+        printf 'filebot_films_H265="%s"\n' "$filebot_films_H265" >> "$script_conf"
+      fi
+      echo "Configuration imported and saved: filebot_films_H265=$filebot_films_H265"
+    fi
+  fi
+fi
 
 
 #######################
 ## Validate required settings
+required_settings=( c411_api_key transmission_login transmission_password transmission_ip transmission_port plex_sort_folder filebot_films)
 missing_value=0
 for variable in "${required_settings[@]}"; do
   if [[ -z "${!variable:-}" ]]; then
@@ -396,8 +434,7 @@ resolution-standard() {
   fi
 }
 codec-standard() {
-  local codec="${1^^}"   # Conversion en majuscules
-
+  local codec="${1^^}"   # Upper the codec name
   case "$codec" in
     HEVC) echo "H265" ;;
     AVC)  echo "H264" ;;
@@ -408,6 +445,19 @@ codec-standard() {
     VC-1) echo "VC-1" ;;
     *) echo "$codec" ;;
   esac
+}
+detect-codec-from-name() {
+  local text="${1,,}"
+
+  if [[ "$text" == *"h265"* || "$text" == *"x265"* || "$text" == *"hevc"* ]]; then
+    echo "H265"
+  elif [[ "$text" == *"h264"* || "$text" == *"x264"* || "$text" == *"avc"* ]]; then
+    echo "H264"
+  elif [[ "$text" == *"av1"* ]]; then
+    echo "AV1"
+  else
+    echo "Unknown"
+  fi
 }
 
 
@@ -444,8 +494,9 @@ echo ""
 section_title="Downloading movies"
 printf "$ui_tag_section" $(lon2 "$section_title") "$section_title"
 rss_file="$script_folder/rss.xml"
-rss_movies_url="https://c411.org/api/torznab?apikey=${c411_api_key}&t=movie&cat=2000"
-#rss_series_url="https://c411.org/api/torznab?apikey=${c411_api_key}&t=movie&cat=5000"
+if [[ -z "${rss_movies_url:-}" ]]; then
+  rss_movies_url="https://c411.org/api/torznab?apikey=${c411_api_key}&t=movie&cat=2000"
+fi
 
 if wget -q -O "$rss_file" "$rss_movies_url"; then
     echo -e "$ui_tag_ok RSS Movies file downloaded"
@@ -455,13 +506,14 @@ else
 fi
 
 while IFS=$'\t' read -r title guid enclosure_url; do
+  echo -e "$ui_tag_info Title: $title"
   echo -e "$ui_tag_info GUID: $guid"
   torrent_file="$script_folder/torrents/$guid.torrent"
   torrent_processed=0
   torrent_skipped=0
   
   ########################################
-  ## Vérification du journal
+  ## Check db file
   if grep -Fxq "$guid" "$script_db_movies_log"; then
     echo -e "$ui_tag_warning Already processed"
     echo "----------------------------------------"
@@ -495,8 +547,11 @@ while IFS=$'\t' read -r title guid enclosure_url; do
   #mapfile -t new_files < <(transmission-show "$torrent_file" | sed -n '/FILES/,$p' | grep -i '\.mkv' | sed 's/^[[:space:]]*//' | sed 's/\.mkv.*/.mkv/I')
   mapfile -t new_files < <(transmission-show "$torrent_file" | sed -n '/FILES/,$p' | grep -Ei '\.(mkv|mp4)([[:space:]]|$)' | sed 's/^[[:space:]]*//' | sed -E 's/\.(mkv|mp4).*/.\1/I')
   if ((${#new_files[@]} == 0)); then
-    echo -e "$ui_tag_info Title: $title"
     echo -e "$ui_tag_bad No MKV/MP4 file found"
+    if ! grep -Fxq "$guid" "$script_db_movies_log"; then
+      printf '%s\n' "$guid" >> "$script_db_movies_log"
+      echo -e "$ui_tag_processed Added to database"
+    fi
     echo "----------------------------------------"
     continue
   fi
@@ -508,6 +563,10 @@ while IFS=$'\t' read -r title guid enclosure_url; do
     my_file=$(basename "$my_file_raw")
     my_file_lower=${my_file,,}
     title_lower=${title,,}
+    codec=$(detect-codec-from-name "$my_file_lower")
+    if [[ "$codec" == "Unknown" ]]; then
+      codec=$(detect-codec-from-name "$title_lower")
+    fi
     echo -e "$ui_tag_ok File: $my_file"
     
     ########################################
@@ -519,6 +578,7 @@ while IFS=$'\t' read -r title guid enclosure_url; do
     rm -rf "$temp_dir"
 
     if [[ -z "$filebot_name_full" ]]; then
+      torrent_skipped=1
       echo -e "$ui_tag_bad FileBot issue: no name found"
       continue
     fi
@@ -539,26 +599,15 @@ while IFS=$'\t' read -r title guid enclosure_url; do
     
     ########################################
     ## Vérification locale
-    if [[ -z "${plex_sort_folder:-}" ]]; then
-      plex_sort_conf=$(find /home -type f -path "*/.config/plex_sort/plex_sort.conf" 2>/dev/null | head -n1)
-      if [[ -n "$plex_sort_conf" ]]; then
-        plex_sort_folder=$(dirname "$plex_sort_conf")
-        if grep -qE '^plex_sort_folder=' "$script_conf"; then
-         sed -i "s|^plex_sort_folder=.*|plex_sort_folder=\"$plex_sort_folder\"|" "$script_conf"
-        else
-          printf 'plex_sort_folder="%s"\n' "$plex_sort_folder" >> "$script_conf"
-        fi
-      fi
-    fi
     if [[ -n "${plex_sort_folder:-}" ]]; then
       mapfile -t locate_databases < <(find "$plex_sort_folder" -maxdepth 1 -type f -name "*.locate.db" | sort)
       local_check=""
       for locate_db in "${locate_databases[@]}"; do
-        local_check+=$'\n'"$(locate -d "$locate_db" -- "$filebot_name" || true)"
+        local_check+=$'\n'"$(locate -i -d "$locate_db" -- "$filebot_name" || true)"
       done
       local_check=$(printf '%s\n' "$local_check" | sed '/^$/d')
     else
-      local_check=$(locate -- "$filebot_name" | grep -vE '/mnt/Plex/|/\.Trash/' || true)
+      local_check=$(locate -i -- "$filebot_name" | grep -vE '/mnt/Plex/|/\.Trash/' || true)
     fi
     if [[ -n "$local_check" ]]; then
       local_check_width=$(mediainfo --Inform="Video;%Width%" "$local_check")
@@ -586,21 +635,14 @@ while IFS=$'\t' read -r title guid enclosure_url; do
       torrent_skipped=1
       continue
     fi
-    if [[ "$my_file_lower" == *"remux"* ]]; then
-      echo -e "$ui_tag_bad REMUX detected"
-      torrent_skipped=1
-      continue
-    fi
-    if [[ "$my_file_lower" == *"vostfr"* ]]; then
-      echo -e "$ui_tag_bad VOSTFR detected"
-      torrent_skipped=1
-      continue
-    fi
-    if [[ "$my_file_lower" == *"hdtv"* ]]; then
-      echo -e "$ui_tag_bad HDTV detected"
-      torrent_skipped=1
-      continue
-    fi
+    skip_list_sorted=$(echo "$skip_list" | tr '|' '\n' | tr '[:upper:]' '[:lower:]' | sort -u | xargs)
+    for skip in $skip_list_sorted; do
+      if [[ "$my_file_lower" == *"$skip"* ]]; then
+        echo -e "$ui_tag_bad Ignored release: $skip"
+        torrent_skipped=1
+        continue 2
+      fi
+    done
     echo -e "$ui_tag_ok Movie accepted"
     # On conserve le chemin complet tel qu’il apparaît
     # dans le fichier torrent.
@@ -620,7 +662,7 @@ while IFS=$'\t' read -r title guid enclosure_url; do
     echo "----------------------------------------"
     continue
   fi
-  echo -e "$ui_tag_ok Accepted files: ${#accepted_files[@]}"
+  #echo -e "$ui_tag_ok Accepted files: ${#accepted_files[@]}"
   transmission_host="$transmission_ip:$transmission_port"
   transmission_auth="$transmission_login:$transmission_password"
   
@@ -633,8 +675,18 @@ while IFS=$'\t' read -r title guid enclosure_url; do
     torrent_processed=1
   else
     ########################################
+    ## Destination
+    if [[ "$codec" == "H265" && -n "${filebot_films_H265:-}" && -d "$filebot_films_H265" ]]; then
+      transmission_folder="$filebot_films_H265"
+    elif [[ "$codec" == "AV1" && -n "${filebot_films_AV1:-}" && -d "$filebot_films_AV1" ]]; then
+      transmission_folder="$filebot_films_AV1"
+    else
+      transmission_folder="$filebot_films"
+    fi
+    
+    ########################################
     ## Ajout en pause
-    if ! transmission-remote "$transmission_host" -n "$transmission_auth" -a "$torrent_file" -w "$daemon_destination" -S >/dev/null 2>&1; then
+    if ! transmission-remote "$transmission_host" -n "$transmission_auth" -a "$torrent_file" -w "$transmission_folder" -S >/dev/null 2>&1; then
       echo -e "$ui_tag_bad Unable to add torrent"
       echo "----------------------------------------"
       continue
@@ -650,7 +702,7 @@ while IFS=$'\t' read -r title guid enclosure_url; do
       echo "----------------------------------------"
       continue
     fi
-    echo -e "$ui_tag_ok Torrent ID: $torrent_id"
+    #echo -e "$ui_tag_ok Torrent ID: $torrent_id"
     
     ########################################
     ## Liste des fichiers côté Transmission
@@ -665,31 +717,29 @@ while IFS=$'\t' read -r title guid enclosure_url; do
         file_id=$(printf '%s\n' "$transmission_files" | grep -iF -- "$accepted_name" | head -n 1 | cut -d: -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
       fi
       if [[ -n "$file_id" ]]; then
-        echo -e "$ui_tag_ok File index $file_id: $accepted_name"
+#        echo -e "$ui_tag_ok File index $file_id: $accepted_name"
         accepted_file_ids+=("$file_id")
-      else
-        echo -e "$ui_tag_bad File index not found: $accepted_name"
+#      else
+#        echo -e "$ui_tag_bad File index not found: $accepted_name"
       fi
     done
     
     ########################################
-    ## Aucun indice trouvé
+    ## No accepted file index found : Transmission file deleted 
     if ((${#accepted_file_ids[@]} == 0)); then
       echo -e "$ui_tag_bad No accepted file index found"
-      # Le torrent vient d’être ajouté : on peut le retirer
-      # sans supprimer de données.
       transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" -r >/dev/null 2>&1
       echo "----------------------------------------"
       continue
     fi
     
     ########################################
-    ## Conversion : tableau Bash → 0,2,4
+    ## Listing of selected files 
     file_ids=$(IFS=,; echo "${accepted_file_ids[*]}")
     echo -e "$ui_tag_info Enabled file indexes: $file_ids"
     
     ########################################
-    ## Désactivation de tous les fichiers
+    ## Disable all files
     if ! transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" -G all >/dev/null 2>&1; then
       echo -e "$ui_tag_bad Unable to disable torrent files"
       echo "----------------------------------------"
@@ -697,7 +747,7 @@ while IFS=$'\t' read -r title guid enclosure_url; do
     fi
     
     ########################################
-    ## Activation des fichiers acceptés
+    ## Only enable selected files
     if ! transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" -g "$file_ids" >/dev/null 2>&1; then
       echo -e "$ui_tag_bad Unable to enable selected files"
       echo "----------------------------------------"
@@ -705,20 +755,25 @@ while IFS=$'\t' read -r title guid enclosure_url; do
     fi
     
     ########################################
-    ## Démarrage du torrent
-    if transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" -s >/dev/null 2>&1; then
-      echo -e "$ui_tag_ok Download started"
-      for accepted_file in "${accepted_files[@]}"; do
-        echo -e "$ui_tag_ok Enabled: $(basename "$accepted_file")"
-      done
+    ## Starting torrent
+    if [[ "$transmission_torrent_paused" == "yes" ]]; then
+      echo -e "$ui_tag_warning Download in pause"
       torrent_processed=1
     else
-      echo -e "$ui_tag_bad Unable to start torrent"
+     if transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" -s >/dev/null 2>&1; then
+        echo -e "$ui_tag_ok Download started"
+        for accepted_file in "${accepted_files[@]}"; do
+          echo -e "$ui_tag_ok Enabled: $(basename "$accepted_file")"
+        done
+        torrent_processed=1
+      else
+        echo -e "$ui_tag_bad Unable to start torrent"
+      fi
     fi
   fi
   
   ########################################
-  ## Enregistrement du GUID
+  ## Add GUID to db file
   if (( torrent_processed )); then
     if ! grep -Fxq "$guid" "$script_db_movies_log"; then
       printf '%s\n' "$guid" >> "$script_db_movies_log"
