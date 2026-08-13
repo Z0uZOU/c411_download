@@ -233,7 +233,8 @@ shift $((OPTIND-1)) # remove parsed options and args from $@ list
 
 #######################
 ## Script configuration
-settings_variables=( sudo c411_api_key rss_movies_url transmission_login transmission_password transmission_ip transmission_port transmission_torrent_paused plex_sort_folder skip_list filebot_films filebot_films_H265 push_token_app push_target push_ignored )
+settings_variables=( sudo c411_api_key rss_movies_url transmission_login transmission_password transmission_ip transmission_port transmission_torrent_paused plex_sort_folder skip_list codec_preference filebot_films filebot_films_H265 push_token_app push_target push_ignored )
+required_settings=( c411_api_key transmission_login transmission_password transmission_ip transmission_port plex_sort_folder filebot_films )
 edit_conf=0
 mkdir -p "$(dirname "$script_conf")"
 touch "$script_conf"
@@ -249,6 +250,15 @@ if (( edit_conf )); then
   exit 0
 fi
 source "$script_conf"
+
+codec_preference=${codec_preference^^}
+case "$codec_preference" in
+  H264|H265|AV1|"") ;;
+  *)
+    echo "Invalid codec_preference: $codec_preference (supported: H264, H265, AV1)"
+    codec_preference=""
+    ;;
+esac
 
 
 #######################
@@ -321,7 +331,6 @@ fi
 
 #######################
 ## Validate required settings
-required_settings=( c411_api_key transmission_login transmission_password transmission_ip transmission_port plex_sort_folder filebot_films)
 missing_value=0
 for variable in "${required_settings[@]}"; do
   if [[ -z "${!variable:-}" ]]; then
@@ -341,7 +350,6 @@ Lengh1="55"
 Lengh2="61"
 lon() ( echo $(( Lengh1 + $(wc -c <<<"$1") - $(wc -m <<<"$1") )) )
 lon2() ( echo $(( Lengh2 + $(wc -c <<<"$1") - $(wc -m <<<"$1") )) )
-
 
 printf "\e[46m\u23E5\u23E5   \e[0m \e[46m \e[1m %-61s  \e[0m \e[46m  \e[0m \e[46m \e[0m \e[36m\u2759\e[0m\n" "$script_name_cap"
 echo ""
@@ -448,7 +456,6 @@ codec-standard() {
 }
 detect-codec-from-name() {
   local text="${1,,}"
-
   if [[ "$text" == *"h265"* || "$text" == *"x265"* || "$text" == *"hevc"* ]]; then
     echo "H265"
   elif [[ "$text" == *"h264"* || "$text" == *"x264"* || "$text" == *"avc"* ]]; then
@@ -521,6 +528,26 @@ while IFS=$'\t' read -r title guid enclosure_url; do
   fi
   
   ########################################
+  ## Skip torrent from title
+  title_lower=${title,,}
+  skip_list_sorted=$(echo "$skip_list" | tr '|' '\n' | tr '[:upper:]' '[:lower:]' | sort -u | xargs)
+  for skip in $skip_list_sorted; do
+    if [[ "$title_lower" == *"$skip"* ]]; then
+      echo -e "$ui_tag_bad Ignored torrent title: $skip"
+      torrent_skipped=1
+      break
+    fi
+  done
+  if (( torrent_skipped )); then
+    if ! grep -Fxq "$guid" "$script_db_movies_log"; then
+      printf '%s\n' "$guid" >> "$script_db_movies_log"
+      echo -e "$ui_tag_processed Added to database"
+    fi
+    echo "----------------------------------------"
+    continue
+  fi
+  
+  ########################################
   ## Téléchargement du fichier torrent
   if [[ ! -s "$torrent_file" ]]; then
     if wget -q "$enclosure_url" -O "$torrent_file"; then
@@ -559,13 +586,13 @@ while IFS=$'\t' read -r title guid enclosure_url; do
   ########################################
   ## Analyse de tous les MKV
   accepted_files=()
+  accepted_codecs=()
   for my_file_raw in "${new_files[@]}"; do
     my_file=$(basename "$my_file_raw")
     my_file_lower=${my_file,,}
-    title_lower=${title,,}
-    codec=$(detect-codec-from-name "$my_file_lower")
-    if [[ "$codec" == "Unknown" ]]; then
-      codec=$(detect-codec-from-name "$title_lower")
+    my_file_codec=$(detect-codec-from-name "$my_file_lower")
+    if [[ "$my_file_codec" == "Unknown" ]]; then
+      my_file_codec=$(detect-codec-from-name "$title_lower")
     fi
     echo -e "$ui_tag_ok File: $my_file"
     
@@ -584,7 +611,7 @@ while IFS=$'\t' read -r title guid enclosure_url; do
     fi
     
     ########################################
-    ## Détection des séries
+    ## Series detection
     if [[ "$filebot_name_full" == */SERIES/* ]]; then
       echo -e "$ui_tag_bad TV Series detected: $my_file"
       torrent_skipped=1
@@ -596,37 +623,6 @@ while IFS=$'\t' read -r title guid enclosure_url; do
     fi
     filebot_name=$(basename "$filebot_name_full")
     echo -e "$ui_tag_ok FileBot name: $filebot_name"
-    
-    ########################################
-    ## Vérification locale
-    if [[ -n "${plex_sort_folder:-}" ]]; then
-      mapfile -t locate_databases < <(find "$plex_sort_folder" -maxdepth 1 -type f -name "*.locate.db" | sort)
-      local_check=""
-      for locate_db in "${locate_databases[@]}"; do
-        local_check+=$'\n'"$(locate -i -d "$locate_db" -- "$filebot_name" || true)"
-      done
-      local_check=$(printf '%s\n' "$local_check" | sed '/^$/d')
-    else
-      local_check=$(locate -i -- "$filebot_name" | grep -vE '/mnt/Plex/|/\.Trash/' || true)
-    fi
-    if [[ -n "$local_check" ]]; then
-      local_check_width=$(mediainfo --Inform="Video;%Width%" "$local_check")
-      local_check_height=$(mediainfo --Inform="Video;%Height%" "$local_check")
-      local_check_standard_resolution=$(resolution-standard "$local_check_width" "$local_check_height")
-      local_check_codec_raw=$(mediainfo --Inform="Video;%Format%" "$local_check")
-      local_check_codec=$(codec-standard "$local_check_codec_raw")
-      echo -e "$ui_tag_processed Movie found: $local_check"
-      echo -e "$ui_tag_processed Movie resolution: $local_check_standard_resolution"
-      echo -e "$ui_tag_processed Movie codec: $local_check_codec"
-      if [[ "$local_check_standard_resolution" == "720p" || "$local_check_standard_resolution" == "SD" ]]; then
-        echo -e "$ui_tag_processed Local version ignored (resolution too low)"
-      else
-        echo -e "$ui_tag_processed Local version already good enough"
-        torrent_skipped=1
-        continue
-      fi
-    fi
-    echo -e "$ui_tag_ok New movie detected"
     
     ########################################
     ## Filtres
@@ -643,10 +639,52 @@ while IFS=$'\t' read -r title guid enclosure_url; do
         continue 2
       fi
     done
-    echo -e "$ui_tag_ok Movie accepted"
-    # On conserve le chemin complet tel qu’il apparaît
-    # dans le fichier torrent.
+    
+    ########################################
+    ## Checking for the presence of a local file
+    if [[ -n "${plex_sort_folder:-}" ]]; then
+      mapfile -t locate_databases < <(find "$plex_sort_folder" -maxdepth 1 -type f -name "*.locate.db" | sort)
+      local_check=""
+      for locate_db in "${locate_databases[@]}"; do
+        local_check+=$'\n'"$(locate -i -d "$locate_db" -- "$filebot_name" || true)"
+      done
+      local_check=$(printf '%s\n' "$local_check" | sed '/^$/d')
+    else
+      local_check=$(locate -i -- "$filebot_name" | grep -viE '/mnt/Plex/|/\.Trash/' || true)
+    fi
+    if [[ -n "$local_check" ]]; then
+      local_check_file=$(printf '%s\n' "$local_check" | head -n 1)
+      local_check_width=$(mediainfo --Inform="Video;%Width%" "$local_check_file")
+      local_check_height=$(mediainfo --Inform="Video;%Height%" "$local_check_file")
+      local_check_standard_resolution=$(resolution-standard "$local_check_width" "$local_check_height")
+      local_check_codec_raw=$(mediainfo --Inform="Video;%Format%" "$local_check_file")
+      local_check_codec=$(codec-standard "$local_check_codec_raw")
+      echo -e "$ui_tag_processed Movie found: $local_check_file"
+      echo -e "$ui_tag_processed Movie resolution: $local_check_standard_resolution"
+      echo -e "$ui_tag_processed Movie codec: $local_check_codec"
+
+      if [[ "$local_check_standard_resolution" == "720p" || "$local_check_standard_resolution" == "SD" ]]; then
+        echo -e "$ui_tag_ok Resolution upgrade: $local_check_standard_resolution -> 1080p"
+      elif [[ "$my_file_codec" == "$local_check_codec" ]]; then
+        echo -e "$ui_tag_processed Local version already uses the same codec: $local_check_codec"
+        torrent_skipped=1
+        continue
+      elif [[ -n "${codec_preference:-}" && "$my_file_codec" == "$codec_preference" ]]; then
+        echo -e "$ui_tag_ok Codec replacement: $local_check_codec -> $my_file_codec (preferred: $codec_preference)"
+      elif [[ -n "${codec_preference:-}" ]]; then
+        echo -e "$ui_tag_processed Codec ignored: $my_file_codec (preferred: $codec_preference)"
+        torrent_skipped=1
+        continue
+      else
+        echo -e "$ui_tag_ok Codec replacement: $local_check_codec -> $my_file_codec"
+      fi
+    else
+      echo -e "$ui_tag_ok No local movie found: codec preference not applied ($my_file_codec)"
+    fi
+    echo -e "$ui_tag_ok New movie detected"
+    
     accepted_files+=("$my_file_raw")
+    accepted_codecs+=("$my_file_codec")
   done
   
   ########################################
@@ -676,13 +714,25 @@ while IFS=$'\t' read -r title guid enclosure_url; do
   else
     ########################################
     ## Destination
-    if [[ "$codec" == "H265" && -n "${filebot_films_H265:-}" && -d "$filebot_films_H265" ]]; then
+    torrent_codec="Unknown"
+    for accepted_codec in "${accepted_codecs[@]}"; do
+      if [[ "$accepted_codec" == "H265" ]]; then
+        torrent_codec="H265"
+        break
+      elif [[ "$torrent_codec" == "Unknown" ]]; then
+        torrent_codec="$accepted_codec"
+      fi
+    done
+
+    if [[ "$torrent_codec" == "H265" && -n "${filebot_films_H265:-}" && -d "$filebot_films_H265" ]]; then
       transmission_folder="$filebot_films_H265"
-    elif [[ "$codec" == "AV1" && -n "${filebot_films_AV1:-}" && -d "$filebot_films_AV1" ]]; then
+    elif [[ "$torrent_codec" == "AV1" && -n "${filebot_films_AV1:-}" && -d "$filebot_films_AV1" ]]; then
       transmission_folder="$filebot_films_AV1"
     else
       transmission_folder="$filebot_films"
     fi
+    echo -e "$ui_tag_info Torrent codec: $torrent_codec"
+    echo -e "$ui_tag_info Destination: $transmission_folder"
     
     ########################################
     ## Ajout en pause
