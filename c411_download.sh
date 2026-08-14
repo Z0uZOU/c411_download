@@ -251,15 +251,20 @@ if (( edit_conf )); then
 fi
 source "$script_conf"
 
-codec_preference=${codec_preference^^}
-case "$codec_preference" in
-  H264|H265|AV1|"") ;;
+case "${codec_preference,,}" in
+  h264|x264|avc)
+    codec_preference="H264"
+    ;;
+  h265|x265|hevc)
+    codec_preference="H265"
+    ;;
+  av1)
+    codec_preference="AV1"
+    ;;
   *)
-    echo "Invalid codec_preference: $codec_preference (supported: H264, H265, AV1)"
     codec_preference=""
     ;;
 esac
-
 
 #######################
 ## Import missing values
