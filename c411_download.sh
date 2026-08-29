@@ -243,7 +243,7 @@ exec > >(tee -a "$execution_log") 2>&1
 
 #######################
 ## Script configuration
-push_notification_added_default='Fichier ajouté à Transmission\n\nFilm : $filebot_name\nFichier : $enabled_name\nTorrent : $torrent_name\nCodec : $torrent_codec\nNote IMDb : $imdb_rating\nDestination : $transmission_folder\nÉtat : $transmission_state\n\nSynopsis : $movie_synopsis'
+push_notification_added_default='Film : $filebot_name\nFichier : $enabled_name\nTorrent : $torrent_name\nCodec : $torrent_codec\nNote IMDb : $imdb_rating\nDestination : $transmission_folder\nÉtat : $transmission_state\n\nSynopsis : $movie_synopsis'
 settings_variables=( sudo c411_api_key rss_movies_url transmission_login transmission_password transmission_ip transmission_port transmission_torrent_paused rename_film plex_sort_folder skip_list approved_teams codec_preference imdb_minimum filebot_films filebot_films_H265 push_token_app push_target push_ignored push_notification_added )
 required_settings=( c411_api_key transmission_login transmission_password transmission_ip transmission_port plex_sort_folder filebot_films )
 edit_conf=0
