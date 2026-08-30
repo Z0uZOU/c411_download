@@ -243,8 +243,8 @@ exec > >(tee -a "$execution_log") 2>&1
 
 #######################
 ## Script configuration
-push_notification_added_default='Film : $filebot_name\nFichier : $enabled_name\nTorrent : $torrent_name\nCodec : $torrent_codec\nNote IMDb : $imdb_rating\nDestination : $transmission_folder\nÉtat : $transmission_state\n\nSynopsis : $movie_synopsis'
-settings_variables=( sudo c411_api_key rss_movies_url transmission_login transmission_password transmission_ip transmission_port transmission_torrent_paused rename_film plex_sort_folder skip_list approved_teams codec_preference imdb_minimum filebot_films filebot_films_H265 push_token_app push_target push_ignored push_notification_added )
+push_notification_added_default='Fichier ajouté à Transmission\n\nFilm : $filebot_name\nFichier : $enabled_name\nTorrent : $torrent_name\nCodec : $torrent_codec\nNote IMDb : $imdb_rating\nDestination : $transmission_folder\nÉtat : $transmission_state\n\nSynopsis : $movie_synopsis'
+settings_variables=( sudo c411_api_key rss_movies_url transmission_login transmission_password transmission_ip transmission_port transmission_torrent_paused plex_sort_folder skip_list approved_teams codec_preference imdb_minimum filebot_films filebot_films_H265 push_token_app push_target push_ignored push_notification_added )
 required_settings=( c411_api_key transmission_login transmission_password transmission_ip transmission_port plex_sort_folder filebot_films )
 edit_conf=0
 mkdir -p "$(dirname "$script_conf")"
@@ -260,9 +260,6 @@ for script_variable in "${settings_variables[@]}"; do
         ;;
       transmission_torrent_paused)
         printf 'transmission_torrent_paused="no"\n' >> "$script_conf"
-        ;;
-      rename_film)
-        printf 'rename_film="no"\n' >> "$script_conf"
         ;;
       skip_list)
         printf 'skip_list="remux|vostfr|hdtv"\n' >> "$script_conf"
@@ -302,11 +299,6 @@ fi
 source "$script_conf"
 push_notification_added="${push_notification_added_literal:-$push_notification_added_default}"
 
-rename_film="${rename_film,,}"
-if [[ "$rename_film" != "yes" && "$rename_film" != "no" ]]; then
-  echo "Invalid rename_film value: $rename_film (expected: yes or no)"
-  exit 1
-fi
 transmission_torrent_paused="${transmission_torrent_paused,,}"
 if [[ "$transmission_torrent_paused" != "yes" && "$transmission_torrent_paused" != "no" ]]; then
   echo "Invalid transmission_torrent_paused value: $transmission_torrent_paused (expected: yes or no)"
@@ -623,34 +615,6 @@ imdb-rating-meets-minimum() {
   local rating="$1"
   local minimum="$2"
   awk -v rating="$rating" -v minimum="$minimum" 'BEGIN { exit !(rating >= minimum) }'
-}
-
-set-torrent-comment() {
-  local source_file="$1"
-  local destination_file="$2"
-  local comment="$3"
-  local first_byte=""
-  local chunk=""
-  local LC_ALL=C
-
-  exec 3<"$source_file" || return 1
-  if ! IFS= read -r -N 1 first_byte <&3 || [[ "$first_byte" != "d" ]]; then
-    exec 3<&-
-    return 1
-  fi
-
-  {
-    printf 'd7:comment%d:%s' "${#comment}" "$comment"
-    # Bash cannot store NUL bytes, so copy each binary segment and restore
-    # its NUL delimiter instead of loading the torrent into one variable.
-    while IFS= read -r -d '' chunk <&3; do
-      printf '%s\0' "$chunk"
-    done
-    printf '%s' "$chunk"
-  } > "$destination_file"
-  local status=$?
-  exec 3<&-
-  return "$status"
 }
 
 resolution-standard() {
@@ -1090,26 +1054,11 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
     
     ########################################
     ## Ajout en pause
-    torrent_add_file="$torrent_file"
-    commented_torrent_file=""
-    if [[ "$rename_film" == "yes" ]]; then
-      commented_torrent_file=$(mktemp "/var/tmp/c411-commented.XXXXXX.torrent")
-      if set-torrent-comment "$torrent_file" "$commented_torrent_file" "$title"; then
-        torrent_add_file="$commented_torrent_file"
-        echo -e "$ui_tag_ok Torrent comment added: $title"
-      else
-        echo -e "$ui_tag_warning Unable to add torrent comment"
-        rm -f "$commented_torrent_file"
-        commented_torrent_file=""
-      fi
-    fi
-    if ! transmission-remote "$transmission_host" -n "$transmission_auth" -a "$torrent_add_file" -w "$transmission_folder" -S >/dev/null 2>&1; then
-      [[ -n "$commented_torrent_file" ]] && rm -f "$commented_torrent_file"
+    if ! transmission-remote "$transmission_host" -n "$transmission_auth" -a "$torrent_file" -w "$transmission_folder" -S >/dev/null 2>&1; then
       echo -e "$ui_tag_bad Unable to add torrent"
       echo "----------------------------------------"
       continue
     fi
-    [[ -n "$commented_torrent_file" ]] && rm -f "$commented_torrent_file"
     echo -e "$ui_tag_ok Torrent added paused"
     sleep 1
     
@@ -1146,24 +1095,8 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
       fi
       if [[ -n "$file_id" ]]; then
 #        echo -e "$ui_tag_ok File index $file_id: $accepted_name"
-        enabled_file="$accepted_file"
-        if [[ "$rename_film" == "yes" ]]; then
-          renamed_name="${accepted_movie_names[$accepted_index]}.${accepted_name##*.}"
-          if [[ "$accepted_name" != "$renamed_name" ]]; then
-            if transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" --path "$accepted_file" --rename "$renamed_name" >/dev/null 2>&1; then
-              if [[ "$accepted_file" == */* ]]; then
-                enabled_file="${accepted_file%/*}/$renamed_name"
-              else
-                enabled_file="$renamed_name"
-              fi
-              echo -e "$ui_tag_ok Transmission file renamed: $renamed_name"
-            else
-              echo -e "$ui_tag_warning Unable to rename Transmission file: $accepted_name"
-            fi
-          fi
-        fi
         accepted_file_ids+=("$file_id")
-        enabled_files+=("$enabled_file")
+        enabled_files+=("$accepted_file")
         enabled_movie_names+=("${accepted_movie_names[$accepted_index]}")
         enabled_movie_synopses+=("${accepted_movie_synopses[$accepted_index]}")
         enabled_imdb_ratings+=("${accepted_imdb_ratings[$accepted_index]}")
