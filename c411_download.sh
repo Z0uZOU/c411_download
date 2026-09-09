@@ -1,17 +1,6 @@
 #!/bin/bash
 
 #######################
-## Check if this script is running
-lock_file="/tmp/$(basename "$0").lock"
-exec 200>"$lock_file"
-
-if ! flock -n 200; then
-    echo "Script already running..."
-    exit 1
-fi
-
-
-#######################
 ## Generating script variables and basics
 script_name=$(basename "$0" | cut -d'.' -f1)
 script_name_cap=${script_name^^}
@@ -19,20 +8,25 @@ script_name_full=$(basename "$0")
 script_bin="$0"
 script_conf=`echo $HOME"/.config/"$script_name"/"$script_name".conf"`
 script_remote="https://raw.githubusercontent.com/Z0uZOU/$script_name/main/$script_name_full"
-script_cron_log=`echo "/var/log/"$script_name".log"`
+url_conf_remote="https://raw.githubusercontent.com/Z0uZOU/$script_name/main/url.conf"
 script_folder="$HOME/.config/$script_name"
+script_tmp_folder="$script_folder/tmp"
+script_cron_log="$script_folder/cron.log"
 script_db_movies_log="$script_folder/db_movies.log"
-if [[ ! -d "$script_folder" ]]; then
-  mkdir -p "$script_folder"
-fi
-if [[ ! -d "$script_folder/logs" ]]; then
-  mkdir -p "$script_folder/logs"
-fi
-if [[ ! -d "$script_folder/torrents" ]]; then
-  mkdir -p "$script_folder/torrents"
-fi
+mkdir -p "$script_folder/logs" "$script_folder/torrents" "$script_tmp_folder"
 if [[ ! -f "$script_db_movies_log" ]]; then
   touch "$script_db_movies_log"
+fi
+
+
+#######################
+## Check if this script is running
+lock_file="$script_tmp_folder/$script_name.lock"
+exec 200>"$lock_file"
+
+if ! flock -n 200; then
+    echo "Script already running..."
+    exit 1
 fi
 
 #######################
@@ -186,11 +180,11 @@ while getopts eushf:cm:l:-: OPT; do
             eval next_arg=\${$OPTIND}
             if [[ "$next_arg" == @(|status) ]]; then
               echo "Checking scheduler status..."
-              crontab -l > $HOME/my_old_cron.txt
-              cron_check=`cat $HOME/my_old_cron.txt | grep $script_name`
+              crontab -l > "$script_tmp_folder/my_old_cron.txt"
+              cron_check=`cat "$script_tmp_folder/my_old_cron.txt" | grep $script_name`
               if [[ "$cron_check" != "" ]]; then
                 echo "- script was added in the cron"
-                cron_status=`cat $HOME/my_old_cron.txt | grep $script_name | grep "^#"`
+                cron_status=`cat "$script_tmp_folder/my_old_cron.txt" | grep $script_name | grep "^#"`
                 if [[ "$cron_status" == "" ]]; then
                   echo "- script is currently enabled"
                 else
@@ -201,27 +195,27 @@ while getopts eushf:cm:l:-: OPT; do
               fi
             elif [[ "$next_arg" == "enable" ]]; then
               echo "Enabling the script in the cron"
-              crontab -l > $HOME/my_old_cron.txt
-              safety_check=`cat $HOME/my_old_cron.txt | grep $script_name | grep "^#"`
+              crontab -l > "$script_tmp_folder/my_old_cron.txt"
+              safety_check=`cat "$script_tmp_folder/my_old_cron.txt" | grep $script_name | grep "^#"`
               if [[ "$safety_check" != "" ]]; then
-                cat $HOME/my_old_cron.txt | grep $script_name | sed  's/^#//' > $HOME/my_new_cron.txt
-                crontab $HOME/my_new_cron.txt
+                cat "$script_tmp_folder/my_old_cron.txt" | grep $script_name | sed  's/^#//' > "$script_tmp_folder/my_new_cron.txt"
+                crontab "$script_tmp_folder/my_new_cron.txt"
               else
                 echo "Script is already enabled"
               fi
             elif [[ "$next_arg" == "disable" ]]; then
               echo "Disabling the script in the cron"
-              crontab -l > $HOME/my_old_cron.txt
-              safety_check=`cat $HOME/my_old_cron.txt | grep $script_name | grep "^#"`
+              crontab -l > "$script_tmp_folder/my_old_cron.txt"
+              safety_check=`cat "$script_tmp_folder/my_old_cron.txt" | grep $script_name | grep "^#"`
               if [[ "$safety_check" == "" ]]; then
-                cat $HOME/my_old_cron.txt | grep $script_name | sed 's/^/#/' > $HOME/my_new_cron.txt
-                crontab $HOME/my_new_cron.txt
+                cat "$script_tmp_folder/my_old_cron.txt" | grep $script_name | sed 's/^/#/' > "$script_tmp_folder/my_new_cron.txt"
+                crontab "$script_tmp_folder/my_new_cron.txt"
               else
                 echo "Script is already disabled"
               fi
             fi
-            rm $HOME/my_old_cron.txt 2>/dev/null
-            rm $HOME/my_new_cron.txt 2>/dev/null
+            rm "$script_tmp_folder/my_old_cron.txt" 2>/dev/null
+            rm "$script_tmp_folder/my_new_cron.txt" 2>/dev/null
             exit 0
             ;;
     ??* )          die "Illegal option --$OPT" ;;  # bad long option
@@ -244,7 +238,7 @@ exec > >(tee -a "$execution_log") 2>&1
 #######################
 ## Script configuration
 push_notification_added_default='Fichier ajouté à Transmission\n\nFilm : $filebot_name\nFichier : $enabled_name\nTorrent : $torrent_name\nCodec : $torrent_codec\nNote IMDb : $imdb_rating\nDestination : $transmission_folder\nÉtat : $transmission_state\n\nSynopsis : $movie_synopsis'
-settings_variables=( sudo c411_api_key rss_movies_url transmission_login transmission_password transmission_ip transmission_port transmission_torrent_paused plex_sort_folder skip_list approved_teams codec_preference imdb_minimum filebot_films filebot_films_H265 push_token_app push_target push_ignored push_notification_added )
+settings_variables=( sudo c411_api_key transmission_login transmission_password transmission_ip transmission_port transmission_torrent_paused plex_sort_folder skip_list approved_teams resolution_preference codec_preference imdb_minimum filebot_films filebot_films_H265 push_token_app push_target push_ignored push_notification_added )
 required_settings=( c411_api_key transmission_login transmission_password transmission_ip transmission_port plex_sort_folder filebot_films )
 edit_conf=0
 mkdir -p "$(dirname "$script_conf")"
@@ -257,6 +251,9 @@ for script_variable in "${settings_variables[@]}"; do
         ;;
       imdb_minimum)
         printf 'imdb_minimum=""\n' >> "$script_conf"
+        ;;
+      resolution_preference)
+        printf 'resolution_preference=""\n' >> "$script_conf"
         ;;
       transmission_torrent_paused)
         printf 'transmission_torrent_paused="no"\n' >> "$script_conf"
@@ -304,6 +301,29 @@ if [[ "$transmission_torrent_paused" != "yes" && "$transmission_torrent_paused" 
   echo "Invalid transmission_torrent_paused value: $transmission_torrent_paused (expected: yes or no)"
   exit 1
 fi
+
+resolution_preference="${resolution_preference,,}"
+case "$resolution_preference" in
+  ""|1080|1080p|fhd)
+    resolution_preference="1080p"
+    resolution_pattern='1080p'
+    resolution_target_standard="1080p"
+    ;;
+  2160|2160p|4k|uhd)
+    resolution_preference="4K"
+    resolution_pattern='2160p|4k|uhd'
+    resolution_target_standard="4K"
+    ;;
+  720|720p|hd)
+    resolution_preference="720p"
+    resolution_pattern='720p'
+    resolution_target_standard="720p"
+    ;;
+  *)
+    echo "Invalid resolution_preference value: $resolution_preference (expected: 720p, 1080p or 4K)"
+    exit 1
+    ;;
+esac
 
 imdb_minimum="${imdb_minimum//,/.}"
 if [[ -n "$imdb_minimum" ]]; then
@@ -436,19 +456,17 @@ show-execution-end() {
 }
 trap 'show-execution-end "$?"' EXIT
 
-printf "\e[46m \u23E5\u23E5\u23E5 \e[0m \e[46m \e[1m %-61s  \e[0m \e[46m  \e[0m \e[46m \e[0m \e[36m\u2759\e[0m\n" "$script_name_cap"
-printf 'Execution log: %s\n' "$execution_log"
-echo ""
-
 
 #######################
 ## UI tags
 ui_tag_ok="[\e[42m \u2713 \e[0m]"
 ui_tag_bad="[\e[41m \u2717 \e[0m]"
-ui_tag_info="[ \u2794 \e[0m]"
-ui_tag_processed="[...\e[0m]"
+ui_tag_info="[ \u2794 ]"
+ui_tag_processed="[...]"
 ui_tag_warning="[\e[43m \u2713 \e[0m]"
 ui_tag_section="\e[44m[\u2263\u2263\u2263]\e[0m \e[44m \e[1m %-*s  \e[0m \e[44m  \e[0m \e[44m \e[0m \e[34m\u2759\e[0m\n"
+printf "\e[46m \u23E5\u23E5\u23E5 \e[0m \e[46m \e[1m %-61s  \e[0m \e[46m  \e[0m \e[46m \e[0m \e[36m\u2759\e[0m\n" "$script_name_cap"
+echo -e "$ui_tag_processed Execution log: $execution_log"
 
 
 #######################
@@ -629,15 +647,24 @@ resolution-standard() {
     width=$height
     height=$tmp
   fi
-  if (( width >= 3648 )); then
+  if (( width >= 3648 || height >= 2052 )); then
     echo "4K"
-  elif (( width >= 1824 )); then
+  elif (( width >= 1824 || height >= 1026 )); then
     echo "1080p"
-  elif (( width >= 1216 )); then
+  elif (( width >= 1216 || height >= 684 )); then
     echo "720p"
   else
     echo "SD"
   fi
+}
+resolution-rank() {
+  case "$1" in
+    SD) echo 0 ;;
+    720p) echo 1 ;;
+    1080p) echo 2 ;;
+    4K) echo 3 ;;
+    *) echo -1 ;;
+  esac
 }
 codec-standard() {
   local codec="${1^^}"   # Upper the codec name
@@ -670,6 +697,7 @@ approved-team-from-name() {
 
   name=${name%.mkv}
   name=${name%.mp4}
+  name=${name%.avi}
   while [[ "$name" == *']' || "$name" == *')' ]]; do
     name=${name%?}
   done
@@ -694,6 +722,23 @@ approved-team-from-name() {
 
   return 1
 }
+
+
+#######################
+## Check update
+this_script=$(realpath -s "$0")
+if curl -m 2 --head --silent --fail "$script_remote" 2>/dev/null >/dev/null; then
+  md5_local=`md5sum "$this_script" | cut -f1 -d" " 2>/dev/null`
+  md5_remote=`curl -s "$script_remote" | md5sum | cut -f1 -d" "`
+  if [[ "$md5_local" != "$md5_remote" ]]; then
+    echo -e "$ui_tag_warning Une nouvelle version du script est disponible..."
+  else
+    echo -e "$ui_tag_ok Le script est à jour..."
+  fi
+else
+  echo -e "$ui_tag_bad Script hors ligne..."
+fi
+echo ""
 
 
 #######################
@@ -729,11 +774,34 @@ echo ""
 section_title="Downloading movies"
 printf "$ui_tag_section" $(lon2 "$section_title") "$section_title"
 rss_file="$script_folder/rss.xml"
-if [[ -z "${rss_movies_url:-}" ]]; then
-  rss_movies_url="https://c411.org/api/torznab?apikey=${c411_api_key}&t=movie&cat=2000"
+url_conf_file="$script_folder/url.conf"
+url_conf_temp=$(mktemp "$script_tmp_folder/c411-url.XXXXXX.conf")
+if ! wget -q -O "$url_conf_temp" "$url_conf_remote"; then
+  rm -f "$url_conf_temp"
+  echo -e "$ui_tag_bad URL configuration not downloaded: $url_conf_remote"
+  exit 1
 fi
+mv -f "$url_conf_temp" "$url_conf_file"
+rss_movies_url_template=""
+while IFS= read -r url_conf_line; do
+  if [[ "$url_conf_line" =~ ^[[:space:]]*rss_movies_url[[:space:]]*=(.*)$ ]]; then
+    rss_movies_url_template="${BASH_REMATCH[1]}"
+    rss_movies_url_template="${rss_movies_url_template#\"}"
+    rss_movies_url_template="${rss_movies_url_template%\"}"
+    rss_movies_url_template="${rss_movies_url_template#\'}"
+    rss_movies_url_template="${rss_movies_url_template%\'}"
+    break
+  fi
+done < "$url_conf_file"
+rss_movies_url="${rss_movies_url_template//\$\{c411_api_key\}/$c411_api_key}"
+rss_movies_url="${rss_movies_url//\$c411_api_key/$c411_api_key}"
+if [[ "$rss_movies_url" != http://* && "$rss_movies_url" != https://* ]]; then
+  echo -e "$ui_tag_bad Invalid rss_movies_url in: $url_conf_remote"
+  exit 1
+fi
+echo -e "$ui_tag_ok RSS Movies URL loaded from: $url_conf_remote"
 
-rss_temp_file=$(mktemp "/var/tmp/c411-rss.XXXXXX.xml")
+rss_temp_file=$(mktemp "$script_tmp_folder/c411-rss.XXXXXX.xml")
 if ! wget -q -O "$rss_temp_file" "$rss_movies_url"; then
   rm -f "$rss_temp_file"
   echo -e "$ui_tag_bad RSS Movies file not downloaded"
@@ -747,6 +815,7 @@ if ! xmlstarlet val -q "$rss_temp_file" 2>/dev/null ||
 fi
 mv -f "$rss_temp_file" "$rss_file"
 echo -e "$ui_tag_ok RSS Movies file downloaded"
+echo " ----------------------------------------------------------------------------"
 
 while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
   echo -e "$ui_tag_info Title: $title"
@@ -759,7 +828,7 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
   ## Check db file
   if grep -Fxq "$guid" "$script_db_movies_log"; then
     echo -e "$ui_tag_warning Already processed"
-    echo "----------------------------------------"
+    echo " ----------------------------------------------------------------------------"
     continue
   fi
   
@@ -779,7 +848,7 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
       printf '%s\n' "$guid" >> "$script_db_movies_log"
       echo -e "$ui_tag_processed Added to database"
     fi
-    echo "----------------------------------------"
+    echo " ----------------------------------------------------------------------------"
     continue
   fi
   
@@ -791,7 +860,7 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
     else
       echo -e "$ui_tag_bad Unable to download torrent file"
       rm -f "$torrent_file"
-      echo "----------------------------------------"
+      echo " ----------------------------------------------------------------------------"
       continue
     fi
   fi
@@ -801,21 +870,20 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
   torrent_name=$(transmission-show "$torrent_file" | sed -nE 's/^[[:space:]]*Name:[[:space:]]*//p' | head -n 1)
   if [[ -z "$torrent_name" ]]; then
     echo -e "$ui_tag_bad Unable to determine torrent name"
-    echo "----------------------------------------"
+    echo " ----------------------------------------------------------------------------"
     continue
   fi
   
   ########################################
-  ## Extraction de tous les fichiers MKV
-  #mapfile -t new_files < <(transmission-show "$torrent_file" | sed -n '/FILES/,$p' | grep -i '\.mkv' | sed 's/^[[:space:]]*//' | sed 's/\.mkv.*/.mkv/I')
-  mapfile -t new_files < <(transmission-show "$torrent_file" | sed -n '/FILES/,$p' | grep -Ei '\.(mkv|mp4)([[:space:]]|$)' | sed 's/^[[:space:]]*//' | sed -E 's/\.(mkv|mp4).*/.\1/I')
+  ## Extraction de tous les fichiers vidéo acceptés
+  mapfile -t new_files < <(transmission-show "$torrent_file" | sed -n '/FILES/,$p' | grep -Ei '\.(mkv|mp4|avi)([[:space:]]|$)' | sed 's/^[[:space:]]*//' | sed -E 's/\.(mkv|mp4|avi).*/.\1/I')
   if ((${#new_files[@]} == 0)); then
-    echo -e "$ui_tag_bad No MKV/MP4 file found"
+    echo -e "$ui_tag_bad No MKV/MP4/AVI file found"
     if ! grep -Fxq "$guid" "$script_db_movies_log"; then
       printf '%s\n' "$guid" >> "$script_db_movies_log"
       echo -e "$ui_tag_processed Added to database"
     fi
-    echo "----------------------------------------"
+    echo " ----------------------------------------------------------------------------"
     continue
   fi
 
@@ -834,14 +902,14 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
         printf '%s\n' "$guid" >> "$script_db_movies_log"
         echo -e "$ui_tag_processed Added to database"
       fi
-      echo "----------------------------------------"
+      echo " ----------------------------------------------------------------------------"
       continue
     fi
     echo -e "$ui_tag_ok Approved release team: $approved_team"
   fi
   
   ########################################
-  ## Analyse de tous les MKV
+  ## Analyse de tous les fichiers vidéo
   accepted_files=()
   accepted_codecs=()
   accepted_movie_names=()
@@ -862,7 +930,7 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
     
     ########################################
     ## Analyse FileBot
-    temp_dir=$(mktemp -d "/var/tmp/c411-filebot.XXXXXX")
+    temp_dir=$(mktemp -d "$script_tmp_folder/c411-filebot.XXXXXX")
     filebot_input_name="$my_file"
     if ((${#new_files[@]} == 1)) && [[ -n "${title//[[:space:]]/}" ]]; then
       filebot_input_name="${title//\// -}.${my_file##*.}"
@@ -918,8 +986,8 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
     
     ########################################
     ## Filtres
-    if [[ "$my_file_lower" != *"1080p"* && "$title_lower" != *"1080p"* ]]; then
-      echo -e "$ui_tag_bad Resolution ignored: 1080p required"
+    if [[ ! "$my_file_lower $title_lower" =~ $resolution_pattern ]]; then
+      echo -e "$ui_tag_bad Resolution ignored: $resolution_preference required"
       torrent_skipped=1
       continue
     fi
@@ -936,7 +1004,6 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
     ## FileBot metadata and optional IMDb rating filter
     movie_name="${filebot_name%.*}"
     get-movie-metadata "$movie_name" "$tmdb_id"
-    echo -e "$ui_tag_info IMDb rating: $movie_imdb_rating"
     if [[ -n "$imdb_minimum" ]]; then
       if [[ ! "$movie_imdb_rating" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
         echo -e "$ui_tag_bad IMDb rating unavailable (minimum required: $imdb_minimum)"
@@ -949,6 +1016,8 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
       else
         echo -e "$ui_tag_ok IMDb rating accepted: $movie_imdb_rating >= $imdb_minimum"
       fi
+    else
+      echo -e "$ui_tag_info IMDb rating: $movie_imdb_rating"
     fi
     
     ########################################
@@ -974,8 +1043,14 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
       echo -e "$ui_tag_processed Movie resolution: $local_check_standard_resolution"
       echo -e "$ui_tag_processed Movie codec: $local_check_codec"
 
-      if [[ "$local_check_standard_resolution" == "720p" || "$local_check_standard_resolution" == "SD" ]]; then
-        echo -e "$ui_tag_ok Resolution upgrade: $local_check_standard_resolution -> 1080p"
+      local_resolution_rank=$(resolution-rank "$local_check_standard_resolution")
+      target_resolution_rank=$(resolution-rank "$resolution_target_standard")
+      if (( local_resolution_rank >= 0 && local_resolution_rank < target_resolution_rank )); then
+        echo -e "$ui_tag_ok Resolution upgrade: $local_check_standard_resolution -> $resolution_target_standard"
+      elif (( local_resolution_rank > target_resolution_rank )); then
+        echo -e "$ui_tag_processed Resolution downgrade ignored: $local_check_standard_resolution -> $resolution_target_standard"
+        torrent_skipped=1
+        continue
       elif [[ "$my_file_codec" == "$local_check_codec" ]]; then
         echo -e "$ui_tag_processed Local version already uses the same codec: $local_check_codec"
         torrent_skipped=1
@@ -1008,14 +1083,14 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
   ########################################
   ## Aucun fichier accepté
   if ((${#accepted_files[@]} == 0)); then
-    echo -e "$ui_tag_bad No accepted MKV/MP4 file"
+    echo -e "$ui_tag_bad No accepted MKV/MP4/AVI file"
     if (( torrent_skipped )); then
       if ! grep -Fxq "$guid" "$script_db_movies_log"; then
         printf '%s\n' "$guid" >> "$script_db_movies_log"
         echo -e "$ui_tag_processed Added to database"
       fi
     fi
-    echo "----------------------------------------"
+    echo " ----------------------------------------------------------------------------"
     continue
   fi
   #echo -e "$ui_tag_ok Accepted files: ${#accepted_files[@]}"
@@ -1056,7 +1131,7 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
     ## Ajout en pause
     if ! transmission-remote "$transmission_host" -n "$transmission_auth" -a "$torrent_file" -w "$transmission_folder" -S >/dev/null 2>&1; then
       echo -e "$ui_tag_bad Unable to add torrent"
-      echo "----------------------------------------"
+      echo " ----------------------------------------------------------------------------"
       continue
     fi
     echo -e "$ui_tag_ok Torrent added paused"
@@ -1067,7 +1142,7 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
     torrent_id=$(transmission-remote "$transmission_host" -n "$transmission_auth" -l | grep -F -- "$torrent_name" | head -n 1 | awk '{print $1}')
     if [[ -z "$torrent_id" ]]; then
       echo -e "$ui_tag_bad Unable to retrieve torrent ID"
-      echo "----------------------------------------"
+      echo " ----------------------------------------------------------------------------"
       continue
     fi
     #echo -e "$ui_tag_ok Torrent ID: $torrent_id"
@@ -1087,13 +1162,13 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
     for accepted_index in "${!accepted_files[@]}"; do
       accepted_file="${accepted_files[$accepted_index]}"
       accepted_name=$(basename "$accepted_file")
-      file_id=$(printf '%s\n' "$transmission_files" | grep -iF -- "$accepted_file" | head -n 1 | cut -d: -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      file_id=$(printf '%s\n' "$transmission_files" | grep -E '^[[:space:]]*[0-9]+:' | grep -iF -- "$accepted_file" | head -n 1 | cut -d: -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
       # Si le chemin complet ne correspond pas, essaie avec
       # seulement le nom du fichier.
       if [[ -z "$file_id" ]]; then
-        file_id=$(printf '%s\n' "$transmission_files" | grep -iF -- "$accepted_name" | head -n 1 | cut -d: -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        file_id=$(printf '%s\n' "$transmission_files" | grep -E '^[[:space:]]*[0-9]+:' | grep -iF -- "$accepted_name" | head -n 1 | cut -d: -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
       fi
-      if [[ -n "$file_id" ]]; then
+      if [[ "$file_id" =~ ^[0-9]+$ ]]; then
 #        echo -e "$ui_tag_ok File index $file_id: $accepted_name"
         accepted_file_ids+=("$file_id")
         enabled_files+=("$accepted_file")
@@ -1114,29 +1189,40 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
     if ((${#accepted_file_ids[@]} == 0)); then
       echo -e "$ui_tag_bad No accepted file index found"
       transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" -r >/dev/null 2>&1
-      echo "----------------------------------------"
+      echo " ----------------------------------------------------------------------------"
       continue
     fi
     
     ########################################
-    ## Listing of selected files 
+    ## Keep accepted files enabled and disable only unnecessary files
     file_ids=$(IFS=,; echo "${accepted_file_ids[*]}")
     echo -e "$ui_tag_info Enabled file indexes: $file_ids"
-    
-    ########################################
-    ## Disable all files
-    if ! transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" -G all >/dev/null 2>&1; then
-      echo -e "$ui_tag_bad Unable to disable torrent files"
-      echo "----------------------------------------"
-      continue
-    fi
-    
-    ########################################
-    ## Only enable selected files
-    if ! transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" -g "$file_ids" >/dev/null 2>&1; then
-      echo -e "$ui_tag_bad Unable to enable selected files"
-      echo "----------------------------------------"
-      continue
+
+    mapfile -t all_file_ids < <(printf '%s\n' "$transmission_files" | awk '/^[[:space:]]*[0-9]+:/ { id=$1; sub(/:$/, "", id); print id }')
+    disabled_file_ids=()
+    for current_file_id in "${all_file_ids[@]}"; do
+      file_is_accepted=0
+      for accepted_file_id in "${accepted_file_ids[@]}"; do
+        if [[ "$current_file_id" == "$accepted_file_id" ]]; then
+          file_is_accepted=1
+          break
+        fi
+      done
+      if (( ! file_is_accepted )); then
+        disabled_file_ids+=("$current_file_id")
+      fi
+    done
+
+    if ((${#disabled_file_ids[@]})); then
+      disabled_ids=$(IFS=,; echo "${disabled_file_ids[*]}")
+      if transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" -G "$disabled_ids" >/dev/null 2>&1; then
+        echo -e "$ui_tag_ok Disabled unnecessary file indexes: $disabled_ids"
+      else
+        echo -e "$ui_tag_bad Unable to disable unnecessary file indexes: $disabled_ids"
+        transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" -r >/dev/null 2>&1
+        echo " ----------------------------------------------------------------------------"
+        continue
+      fi
     fi
     
     ########################################
@@ -1172,7 +1258,7 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
         push_content=$(render-push-notification)
         poster_file=""
         if [[ -n "$movie_poster_url" ]]; then
-          poster_file=$(mktemp "/var/tmp/c411-poster.XXXXXX")
+          poster_file=$(mktemp "$script_tmp_folder/c411-poster.XXXXXX")
           if ! curl --silent --show-error --fail --location --max-time 20 --output "$poster_file" "$movie_poster_url"; then
             echo -e "$ui_tag_warning Unable to download movie poster: $movie_name"
             rm -f "$poster_file"
@@ -1198,9 +1284,10 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
   if (( torrent_processed )); then
     if ! grep -Fxq "$guid" "$script_db_movies_log"; then
       printf '%s\n' "$guid" >> "$script_db_movies_log"
+      echo -e "$ui_tag_processed Added to database"
     fi
   fi
-  echo "----------------------------------------"
+  echo " ----------------------------------------------------------------------------"
 done < <(
   xmlstarlet sel \
     -N 'torznab=http://torznab.com/schemas/2015/feed' \
