@@ -33,6 +33,86 @@ fi
 ## Advanced command arguments
 die() { echo "$*" >&2; exit 2; }  # complain to STDERR and exit with error
 needs_arg() { if [ -z "$OPTARG" ]; then die "No arg for --$OPT option"; fi; }
+needs_long_arg() {
+  if [[ -z "$OPTARG" ]] && (( OPTIND <= $# )); then
+    OPTARG="${!OPTIND}"
+    ((OPTIND++))
+  fi
+  needs_arg
+}
+
+update_config_list() {
+  local action="$1"
+  local requested_value="$2"
+  local setting_name="$3"
+  local current_value="$4"
+  local config_value line item item_trimmed
+  local setting_pattern="^[[:space:]]*${setting_name}[[:space:]]*=(.*)$"
+  local value_found=0
+  local -a current_items updated_items
+
+  [[ -n "$requested_value" ]] || die "No arg for --$OPT option"
+  if [[ ! "$requested_value" =~ ^[[:alnum:]_.+-]+$ ]]; then
+    die "Invalid $setting_name value: $requested_value"
+  fi
+
+  mkdir -p "$(dirname "$script_conf")"
+  touch "$script_conf"
+  while IFS= read -r line; do
+    if [[ "$line" =~ $setting_pattern ]]; then
+      current_value="${BASH_REMATCH[1]}"
+      current_value="${current_value#\"}"
+      current_value="${current_value%\"}"
+      current_value="${current_value#\'}"
+      current_value="${current_value%\'}"
+      break
+    fi
+  done < "$script_conf"
+
+  IFS='|' read -r -a current_items <<< "$current_value"
+  for item in "${current_items[@]}"; do
+    item_trimmed="${item#"${item%%[![:space:]]*}"}"
+    item_trimmed="${item_trimmed%"${item_trimmed##*[![:space:]]}"}"
+    [[ -n "$item_trimmed" ]] || continue
+    if [[ "${item_trimmed,,}" == "${requested_value,,}" ]]; then
+      value_found=1
+      [[ "$action" == "remove" ]] && continue
+    fi
+    updated_items+=("$item_trimmed")
+  done
+
+  if [[ "$action" == "add" ]]; then
+    if (( value_found )); then
+      echo "$setting_name already contains: $requested_value"
+      return 0
+    fi
+    updated_items+=("$requested_value")
+  elif (( ! value_found )); then
+    echo "$setting_name does not contain: $requested_value"
+    return 0
+  fi
+
+  config_value=$(IFS='|'; echo "${updated_items[*]}")
+  local config_temp
+  config_temp=$(mktemp "$(dirname "$script_conf")/.${script_name}.conf.XXXXXX") || die "Unable to create config temporary file"
+  local setting_written=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ $setting_pattern ]]; then
+      if (( ! setting_written )); then
+        printf '%s="%s"\n' "$setting_name" "$config_value" >> "$config_temp"
+        setting_written=1
+      fi
+    else
+      printf '%s\n' "$line" >> "$config_temp"
+    fi
+  done < "$script_conf"
+  if (( ! setting_written )); then
+    printf '%s="%s"\n' "$setting_name" "$config_value" >> "$config_temp"
+  fi
+  chmod --reference="$script_conf" "$config_temp" 2>/dev/null || true
+  mv -f "$config_temp" "$script_conf"
+  echo "$setting_name updated: $config_value"
+}
 
 while getopts eushf:cm:l:-: OPT; do
   # support long options: https://stackoverflow.com/a/28466267/519360
@@ -58,6 +138,30 @@ while getopts eushf:cm:l:-: OPT; do
             echo " -e [value*] or --edit-config=[value*]     : edit config file (default: nano)"
             echo " -s [value*] or --status=[value*]          : status/enable/disable the script"
             echo " -f \"[value]\" or --find=\"[value]\"          : find something in the logs"
+            echo " --add-skip_list=[value]                   : add a value to skip_list"
+            echo " --remove-skip_list=[value]                : remove a value from skip_list"
+            echo " --add-banned_teams=[value]                : add a team to banned_teams"
+            echo " --remove-banned_teams=[value]             : remove a team from banned_teams"
+            exit 0
+            ;;
+    add-skip_list )
+            needs_long_arg "$@"
+            update_config_list add "$OPTARG" skip_list "remux|vostfr|hdtv"
+            exit 0
+            ;;
+    remove-skip_list )
+            needs_long_arg "$@"
+            update_config_list remove "$OPTARG" skip_list "remux|vostfr|hdtv"
+            exit 0
+            ;;
+    add-banned_teams )
+            needs_long_arg "$@"
+            update_config_list add "$OPTARG" banned_teams ""
+            exit 0
+            ;;
+    remove-banned_teams )
+            needs_long_arg "$@"
+            update_config_list remove "$OPTARG" banned_teams ""
             exit 0
             ;;
     f | find )
@@ -237,8 +341,9 @@ exec > >(tee -a "$execution_log") 2>&1
 
 #######################
 ## Script configuration
-push_notification_added_default='Fichier ajouté à Transmission\n\nFilm : $filebot_name\nFichier : $enabled_name\nTorrent : $torrent_name\nCodec : $torrent_codec\nNote IMDb : $imdb_rating\nDestination : $transmission_folder\nÉtat : $transmission_state\n\nSynopsis : $movie_synopsis'
-settings_variables=( sudo c411_api_key transmission_login transmission_password transmission_ip transmission_port transmission_torrent_paused plex_sort_folder skip_list approved_teams resolution_preference codec_preference imdb_minimum filebot_films filebot_films_H265 push_token_app push_target push_ignored push_notification_added )
+push_notification_added_default='Film : $filebot_name\nFichier : $enabled_name\nTorrent : $torrent_name\nCodec : $torrent_codec\nNote IMDb : $imdb_rating\nDestination : $transmission_folder\nÉtat : $transmission_state\n\nSynopsis : $movie_synopsis'
+push_notification_stopped_default='Torrent: $torrent_name'
+settings_variables=( sudo c411_api_key transmission_login transmission_password transmission_ip transmission_port transmission_torrent_paused plex_sort_folder skip_list banned_teams approved_teams resolution_preference codec_preference imdb_minimum filebot_films filebot_films_H265 push_token_app push_target push_ignored push_notification_added push_notification_stopped )
 required_settings=( c411_api_key transmission_login transmission_password transmission_ip transmission_port plex_sort_folder filebot_films )
 edit_conf=0
 mkdir -p "$(dirname "$script_conf")"
@@ -248,6 +353,9 @@ for script_variable in "${settings_variables[@]}"; do
     case "$script_variable" in
       push_notification_added)
         printf 'push_notification_added="%s"\n' "$push_notification_added_default" >> "$script_conf"
+        ;;
+      push_notification_stopped)
+        printf 'push_notification_stopped="%s"\n' "$push_notification_stopped_default" >> "$script_conf"
         ;;
       imdb_minimum)
         printf 'imdb_minimum=""\n' >> "$script_conf"
@@ -260,6 +368,9 @@ for script_variable in "${settings_variables[@]}"; do
         ;;
       skip_list)
         printf 'skip_list="remux|vostfr|hdtv"\n' >> "$script_conf"
+        ;;
+      banned_teams)
+        printf 'banned_teams=""\n' >> "$script_conf"
         ;;
       *)
         printf '%s=""\n' "$script_variable" >> "$script_conf"
@@ -277,9 +388,12 @@ fi
 # Read the template literally so variables inside double quotes are expanded
 # only when the notification is created, not when the config is sourced.
 push_notification_added_literal=""
+push_notification_stopped_literal=""
 while IFS= read -r config_line; do
   if [[ "$config_line" =~ ^[[:space:]]*push_notification_added[[:space:]]*=(.*)$ ]]; then
     push_notification_added_literal="${BASH_REMATCH[1]}"
+  elif [[ "$config_line" =~ ^[[:space:]]*push_notification_stopped[[:space:]]*=(.*)$ ]]; then
+    push_notification_stopped_literal="${BASH_REMATCH[1]}"
   fi
 done < "$script_conf"
 push_notification_added_literal=$(
@@ -293,8 +407,20 @@ if (( ${#push_notification_added_literal} >= 2 )); then
     push_notification_added_literal="${push_notification_added_literal:1:${#push_notification_added_literal}-2}"
   fi
 fi
+push_notification_stopped_literal=$(
+  printf '%s' "$push_notification_stopped_literal" |
+  sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+)
+if (( ${#push_notification_stopped_literal} >= 2 )); then
+  first_quote="${push_notification_stopped_literal:0:1}"
+  last_quote="${push_notification_stopped_literal: -1}"
+  if [[ ( "$first_quote" == '"' && "$last_quote" == '"' ) || ( "$first_quote" == "'" && "$last_quote" == "'" ) ]]; then
+    push_notification_stopped_literal="${push_notification_stopped_literal:1:${#push_notification_stopped_literal}-2}"
+  fi
+fi
 source "$script_conf"
 push_notification_added="${push_notification_added_literal:-$push_notification_added_default}"
+push_notification_stopped="${push_notification_stopped_literal:-$push_notification_stopped_default}"
 
 transmission_torrent_paused="${transmission_torrent_paused,,}"
 if [[ "$transmission_torrent_paused" != "yes" && "$transmission_torrent_paused" != "no" ]]; then
@@ -548,6 +674,21 @@ render-push-notification() (
   printf '%s' "$notification"
 )
 
+render-stopped-push-notification() (
+  local stopped_torrent_name="$1"
+  local notification="$push_notification_stopped"
+
+  shopt -u patsub_replacement 2>/dev/null || true
+  notification="${notification//\\n/$'\n'}"
+  notification="${notification//\$\{torrent_name\}/$stopped_torrent_name}"
+  notification="${notification//\$torrent_name/$stopped_torrent_name}"
+
+  if (( ${#notification} > 1024 )); then
+    notification="${notification:0:1021}..."
+  fi
+  printf '%s' "$notification"
+)
+
 
 #######################
 ## Loading spinner
@@ -691,8 +832,9 @@ detect-codec-from-name() {
     echo "Unknown"
   fi
 }
-approved-team-from-name() {
+release_team_from_name() {
   local name="${1,,}"
+  local teams="$2"
   local team team_lower team_length prefix_length previous_char
 
   name=${name%.mkv}
@@ -718,7 +860,7 @@ approved-team-from-name() {
         return 0
       fi
     fi
-  done < <(printf '%s\n' "${approved_teams:-}" | tr '|,[:space:]' '\n' | sort -fu)
+  done < <(printf '%s\n' "$teams" | tr '|,[:space:]' '\n' | sort -fu)
 
   return 1
 }
@@ -745,7 +887,7 @@ echo ""
 ## Dependencies
 section_title="Checking dependencies"
 printf "$ui_tag_section" "$(lon2 "$section_title")" "$section_title"
-dependencies=( filebot awk wget xmlstarlet locate transmission-cli curl )
+dependencies=( filebot awk wget xmlstarlet locate transmission-cli curl jq )
 missing=()
 for dependency in "${dependencies[@]}"; do
   if command -v "$dependency" >/dev/null 2>&1; then
@@ -888,11 +1030,31 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
   fi
 
   ########################################
+  ## Filtre des teams interdites
+  if [[ -n "${banned_teams:-}" ]]; then
+    banned_team=""
+    for release_name in "${new_files[@]}" "$torrent_name" "$title"; do
+      if banned_team=$(release_team_from_name "$(basename "$release_name")" "$banned_teams"); then
+        break
+      fi
+    done
+    if [[ -n "$banned_team" ]]; then
+      echo -e "$ui_tag_bad Banned release team: $banned_team"
+      if ! grep -Fxq "$guid" "$script_db_movies_log"; then
+        printf '%s\n' "$guid" >> "$script_db_movies_log"
+        echo -e "$ui_tag_processed Added to database"
+      fi
+      echo " ----------------------------------------------------------------------------"
+      continue
+    fi
+  fi
+
+  ########################################
   ## Filtre des teams autorisées
   if [[ -n "${approved_teams:-}" ]]; then
     approved_team=""
     for release_name in "${new_files[@]}" "$torrent_name" "$title"; do
-      if approved_team=$(approved-team-from-name "$(basename "$release_name")"); then
+      if approved_team=$(release_team_from_name "$(basename "$release_name")" "$approved_teams"); then
         break
       fi
     done
@@ -1126,6 +1288,81 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
     fi
     echo -e "$ui_tag_info Torrent codec: $torrent_codec"
     echo -e "$ui_tag_info Destination: $transmission_folder"
+
+    ########################################
+    ## Resolve movie identities and codec duplicates already in Transmission
+    torrent_movie_labels=()
+    for accepted_index in "${!accepted_files[@]}"; do
+      movie_identity_found=0
+      if [[ "${accepted_tmdb_ids[$accepted_index]}" =~ ^[0-9]+$ ]]; then
+        movie_label="c411-tmdb-${accepted_tmdb_ids[$accepted_index]}"
+        if [[ ! " ${torrent_movie_labels[*]} " == *" $movie_label "* ]]; then
+          torrent_movie_labels+=("$movie_label")
+        fi
+        movie_identity_found=1
+      fi
+      if [[ "${accepted_imdb_ids[$accepted_index]}" =~ ^tt[0-9]+$ ]]; then
+        movie_label="c411-imdb-${accepted_imdb_ids[$accepted_index]}"
+        if [[ ! " ${torrent_movie_labels[*]} " == *" $movie_label "* ]]; then
+          torrent_movie_labels+=("$movie_label")
+        fi
+        movie_identity_found=1
+      fi
+      if (( ! movie_identity_found )); then
+        movie_key=$(printf '%s' "${accepted_movie_names[$accepted_index],,}" | md5sum | cut -d' ' -f1)
+        movie_label="c411-movie-$movie_key"
+        if [[ ! " ${torrent_movie_labels[*]} " == *" $movie_label "* ]]; then
+          torrent_movie_labels+=("$movie_label")
+        fi
+      fi
+    done
+
+    skip_codec_duplicate=0
+    duplicate_hashes_to_stop=()
+    duplicate_names_to_stop=()
+    duplicate_completed_to_stop=()
+    transmission_torrents=$(transmission-remote "$transmission_host" -n "$transmission_auth" -j -t all -i 2>/dev/null)
+    if ! jq -e '.result == "success" and (.arguments.torrents | type == "array")' >/dev/null 2>&1 <<< "$transmission_torrents"; then
+      echo -e "$ui_tag_bad Unable to inspect Transmission torrents for duplicates"
+      echo " ----------------------------------------------------------------------------"
+      continue
+    fi
+    for movie_label in "${torrent_movie_labels[@]}"; do
+      while IFS=$'\t' read -r existing_id existing_hash existing_name existing_codec existing_completed; do
+        [[ -n "$existing_id" ]] || continue
+        if [[ -n "$codec_preference" && "$torrent_codec" == "$codec_preference" && "$existing_codec" != "$codec_preference" ]]; then
+          if [[ ! " ${duplicate_hashes_to_stop[*]} " == *" $existing_hash "* ]]; then
+            duplicate_hashes_to_stop+=("$existing_hash")
+            duplicate_names_to_stop+=("$existing_name")
+            duplicate_completed_to_stop+=("$existing_completed")
+          fi
+        else
+          echo -e "$ui_tag_processed Codec duplicate ignored: $torrent_codec; existing: $existing_name ($existing_codec)"
+          skip_codec_duplicate=1
+          break 2
+        fi
+      done < <(
+        jq -r --arg movie_label "$movie_label" '
+          .arguments.torrents[] |
+          select((.labels // []) | index($movie_label)) |
+          [
+            .id,
+            .hashString,
+            .name,
+            (((.labels // []) | map(select(startswith("c411-codec-"))) | first // "Unknown") | sub("^c411-codec-"; "")),
+            (if ((.sizeWhenDone // 0) > 0 and (.leftUntilDone // -1) == 0) then "yes" else "no" end)
+          ] | @tsv
+        ' <<< "$transmission_torrents"
+      )
+    done
+    if (( skip_codec_duplicate )); then
+      if ! grep -Fxq "$guid" "$script_db_movies_log"; then
+        printf '%s\n' "$guid" >> "$script_db_movies_log"
+        echo -e "$ui_tag_processed Added to database"
+      fi
+      echo " ----------------------------------------------------------------------------"
+      continue
+    fi
     
     ########################################
     ## Ajout en pause
@@ -1146,6 +1383,15 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
       continue
     fi
     #echo -e "$ui_tag_ok Torrent ID: $torrent_id"
+
+    torrent_labels=("c411" "c411-codec-$torrent_codec" "${torrent_movie_labels[@]}")
+    torrent_label_list=$(IFS=,; echo "${torrent_labels[*]}")
+    if ! transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" -L "$torrent_label_list" >/dev/null 2>&1; then
+      echo -e "$ui_tag_bad Unable to label torrent for duplicate management"
+      transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" -r >/dev/null 2>&1
+      echo " ----------------------------------------------------------------------------"
+      continue
+    fi
     
     ########################################
     ## Liste des fichiers côté Transmission
@@ -1223,6 +1469,31 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
         echo " ----------------------------------------------------------------------------"
         continue
       fi
+    fi
+
+    duplicate_stop_failed=0
+    for duplicate_index in "${!duplicate_hashes_to_stop[@]}"; do
+      if transmission-remote "$transmission_host" -n "$transmission_auth" -t "${duplicate_hashes_to_stop[$duplicate_index]}" -S >/dev/null 2>&1; then
+        echo -e "$ui_tag_warning Non-preferred duplicate stopped: ${duplicate_names_to_stop[$duplicate_index]}"
+        if [[ "${duplicate_completed_to_stop[$duplicate_index]}" == "yes" ]]; then
+          echo -e "$ui_tag_processed Torrent already completed; stopped push skipped"
+        elif [[ -n "${push_token_app:-}" && -n "${push_target:-}" ]]; then
+          push_content=$(render-stopped-push-notification "${duplicate_names_to_stop[$duplicate_index]}")
+          if push-message "Torrent stoppé dans Transmission" "$push_content" "-1"; then
+            echo -e "$ui_tag_ok Push sent for stopped torrent: ${duplicate_names_to_stop[$duplicate_index]}"
+          else
+            echo -e "$ui_tag_bad Unable to send stopped torrent push: ${duplicate_names_to_stop[$duplicate_index]}"
+          fi
+        fi
+      else
+        echo -e "$ui_tag_bad Unable to stop non-preferred duplicate: ${duplicate_names_to_stop[$duplicate_index]}"
+        duplicate_stop_failed=1
+      fi
+    done
+    if (( duplicate_stop_failed )); then
+      transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" -r >/dev/null 2>&1
+      echo " ----------------------------------------------------------------------------"
+      continue
     fi
     
     ########################################
