@@ -18,6 +18,7 @@ script_db_series_log="$script_folder/db_series.log"
 #######################
 ## Local multilingual UI
 mui_folder="$script_folder/MUI"
+mui_remote_base="https://raw.githubusercontent.com/Z0uZOU/$script_name/main/MUI"
 display_language=""
 show_cron_log=0
 previous_arg=""
@@ -37,12 +38,45 @@ done
 if [[ -z "$display_language" ]]; then
   display_language="${LANG:-en}"
 fi
-requested_language="$display_language"
 display_language="${display_language%%.*}"
 display_language="${display_language%%_*}"
 display_language="${display_language,,}"
-[[ "$display_language" == "fr" || "$display_language" == "en" ]] || display_language="en"
-[[ -r "$mui_folder/$display_language.lang" ]] || display_language="en"
+[[ "$display_language" =~ ^[a-z][a-z0-9-]*$ ]] || display_language="en"
+
+download-language-file() {
+  local language="$1" destination temporary_file
+
+  destination="$mui_folder/$language.lang"
+  [[ -r "$destination" ]] && return 0
+  mkdir -p "$mui_folder" || return 1
+  temporary_file=$(mktemp "$mui_folder/.${language}.lang.XXXXXX") || return 1
+
+  if command -v curl >/dev/null 2>&1; then
+    curl --silent --fail --location \
+      --connect-timeout 3 --max-time 10 \
+      --output "$temporary_file" "$mui_remote_base/$language.lang"
+  elif command -v wget >/dev/null 2>&1; then
+    wget --quiet --timeout=10 \
+      --output-document="$temporary_file" "$mui_remote_base/$language.lang"
+  else
+    rm -f "$temporary_file"
+    return 1
+  fi
+
+  if [[ $? -eq 0 && -s "$temporary_file" ]] && bash -n "$temporary_file" 2>/dev/null; then
+    chmod 600 "$temporary_file"
+    mv -f "$temporary_file" "$destination"
+    return 0
+  fi
+
+  rm -f "$temporary_file"
+  return 1
+}
+
+if ! download-language-file "$display_language"; then
+  display_language="en"
+  download-language-file "$display_language" || true
+fi
 declare -A MUI=()
 if [[ -r "$mui_folder/$display_language.lang" ]]; then
   source "$mui_folder/$display_language.lang"
@@ -297,7 +331,7 @@ while getopts :eushf:cm:l:-: OPT; do
             selected_language="${selected_language%%_*}"
             selected_language="${selected_language,,}"
             echo
-            if [[ "$selected_language" == "fr" || "$selected_language" == "en" ]]; then
+            if [[ "$selected_language" == "$display_language" ]]; then
               echo "$(msg language_selected "$selected_language")"
             else
               echo "$(msg language_fallback "$OPTARG")"
