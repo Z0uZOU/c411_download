@@ -1268,21 +1268,27 @@ section_title="$(msg dependencies_title)"
 printf "$ui_tag_section" "$(lon2 "$section_title")" "$section_title"
 dependencies=( filebot awk wget xmlstarlet locate transmission-cli curl jq )
 missing=()
+available_dependencies=()
 for dependency in "${dependencies[@]}"; do
   if command -v "$dependency" >/dev/null 2>&1; then
-    echo -e "$ui_tag_ok $(msg dependency "$dependency")"
+    available_dependencies+=("$dependency")
   else
     echo -e "$ui_tag_bad $(msg dependency_missing "$dependency")"
     echo -e "$ui_tag_warning $(msg dependency_installing)"
     echo $sudo | sudo -kS apt install $dependency -y 2>/dev/null
     if $dependency -help > /dev/null 2>/dev/null ; then
-      echo -e "$ui_tag_ok $(msg dependency "$dependency")"
+      available_dependencies+=("$dependency")
     else
       echo -e "$ui_tag_bad $(msg dependency_manual "$dependency")"
       missing+=("$dependency")
     fi                                                                                    ##
   fi
 done
+if ((${#available_dependencies[@]})); then
+  dependencies_list=$(IFS=,; echo "${available_dependencies[*]}")
+  dependencies_list="${dependencies_list//,/, }"
+  echo -e "$ui_tag_ok $(msg dependencies_ok "$dependencies_list")"
+fi
 if ((${#missing[@]})); then
     echo "$(msg dependency_hint "${missing[*]}")"
     exit 1
