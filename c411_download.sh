@@ -6,17 +6,78 @@ script_name=$(basename "$0" | cut -d'.' -f1)
 script_name_cap=${script_name^^}
 script_name_full=$(basename "$0")
 script_bin="$0"
-script_conf=`echo $HOME"/.config/"$script_name"/"$script_name".conf"`
+script_conf="$HOME/.config/$script_name/$script_name.conf"
 script_remote="https://raw.githubusercontent.com/Z0uZOU/$script_name/main/$script_name_full"
 url_conf_remote="https://raw.githubusercontent.com/Z0uZOU/$script_name/main/url.conf"
 script_folder="$HOME/.config/$script_name"
 script_tmp_folder="$script_folder/tmp"
 script_cron_log="$script_folder/cron.log"
 script_db_movies_log="$script_folder/db_movies.log"
-mkdir -p "$script_folder/logs" "$script_folder/torrents" "$script_tmp_folder"
-if [[ ! -f "$script_db_movies_log" ]]; then
-  touch "$script_db_movies_log"
+script_db_series_log="$script_folder/db_series.log"
+
+#######################
+## Local multilingual UI
+mui_folder="$script_folder/MUI"
+display_language=""
+show_cron_log=0
+previous_arg=""
+for argument in "$@"; do
+  if [[ "$previous_arg" == "-l" || "$previous_arg" == "--language" ]]; then
+    display_language="$argument"
+    previous_arg=""
+    continue
+  fi
+  case "$argument" in
+    -l|--language) previous_arg="$argument" ;;
+    --language=*) display_language="${argument#*=}" ;;
+    -l?*) display_language="${argument#-l}" ;;
+    -c|--cron-log) show_cron_log=1 ;;
+  esac
+done
+if [[ -z "$display_language" ]]; then
+  display_language="${LANG:-en}"
 fi
+requested_language="$display_language"
+display_language="${display_language%%.*}"
+display_language="${display_language%%_*}"
+display_language="${display_language,,}"
+[[ "$display_language" == "fr" || "$display_language" == "en" ]] || display_language="en"
+[[ -r "$mui_folder/$display_language.lang" ]] || display_language="en"
+declare -A MUI=()
+if [[ -r "$mui_folder/$display_language.lang" ]]; then
+  source "$mui_folder/$display_language.lang"
+fi
+msg() {
+  local key="$1"
+  shift
+  printf -- "${MUI[$key]:-$key}" "$@"
+}
+media-name() {
+  if [[ "$1" == "series" ]]; then
+    msg media_series_singular
+  else
+    msg media_movie
+  fi
+}
+
+# Reading the cron log must remain available while the main process holds its lock.
+if (( show_cron_log )); then
+  echo -e "\033[1m$(msg cron_log_title "$script_name_cap")\033[0m"
+  echo
+  if [[ -f "$script_cron_log" ]]; then
+    date_log=$(date -r "$script_cron_log")
+    cat "$script_cron_log"
+    echo
+    echo "$(msg log_created "$date_log")"
+  else
+    echo "$(msg no_log)"
+  fi
+  exit 0
+fi
+
+mkdir -p "$script_folder/logs" "$script_folder/torrents" "$script_tmp_folder"
+touch "$script_db_movies_log" "$script_db_series_log"
+chmod 600 "$script_db_movies_log" "$script_db_series_log"
 
 
 #######################
@@ -25,14 +86,14 @@ lock_file="$script_tmp_folder/$script_name.lock"
 exec 200>"$lock_file"
 
 if ! flock -n 200; then
-    echo "Script already running..."
+    echo "$(msg already_running)"
     exit 1
 fi
 
 #######################
 ## Advanced command arguments
-die() { echo "$*" >&2; exit 2; }  # complain to STDERR and exit with error
-needs_arg() { if [ -z "$OPTARG" ]; then die "No arg for --$OPT option"; fi; }
+die() { echo "$*" >&2; exit 2; }
+needs_arg() { if [ -z "$OPTARG" ]; then die "$(msg missing_option_arg "$OPT")"; fi; }
 needs_long_arg() {
   if [[ -z "$OPTARG" ]] && (( OPTIND <= $# )); then
     OPTARG="${!OPTIND}"
@@ -51,9 +112,9 @@ update_config_list() {
   local value_found=0
   local -a current_items updated_items
 
-  [[ -n "$requested_value" ]] || die "No arg for --$OPT option"
+  [[ -n "$requested_value" ]] || die "$(msg missing_option_arg "$OPT")"
   if [[ ! "$requested_value" =~ ^[[:alnum:]_.+-]+$ ]]; then
-    die "Invalid $setting_name value: $requested_value"
+    die "$(msg invalid_setting "$setting_name" "$requested_value")"
   fi
 
   mkdir -p "$(dirname "$script_conf")"
@@ -83,18 +144,18 @@ update_config_list() {
 
   if [[ "$action" == "add" ]]; then
     if (( value_found )); then
-      echo "$setting_name already contains: $requested_value"
+      echo "$(msg list_contains "$setting_name" "$requested_value")"
       return 0
     fi
     updated_items+=("$requested_value")
   elif (( ! value_found )); then
-    echo "$setting_name does not contain: $requested_value"
+    echo "$(msg list_not_contains "$setting_name" "$requested_value")"
     return 0
   fi
 
   config_value=$(IFS='|'; echo "${updated_items[*]}")
   local config_temp
-  config_temp=$(mktemp "$(dirname "$script_conf")/.${script_name}.conf.XXXXXX") || die "Unable to create config temporary file"
+  config_temp=$(mktemp "$(dirname "$script_conf")/.${script_name}.conf.XXXXXX") || die "$(msg temp_config_failed)"
   local setting_written=0
   while IFS= read -r line || [[ -n "$line" ]]; do
     if [[ "$line" =~ $setting_pattern ]]; then
@@ -111,10 +172,10 @@ update_config_list() {
   fi
   chmod --reference="$script_conf" "$config_temp" 2>/dev/null || true
   mv -f "$config_temp" "$script_conf"
-  echo "$setting_name updated: $config_value"
+  echo "$(msg list_updated "$setting_name" "$config_value")"
 }
 
-while getopts eushf:cm:l:-: OPT; do
+while getopts :eushf:cm:l:-: OPT; do
   # support long options: https://stackoverflow.com/a/28466267/519360
   if [ "$OPT" = "-" ]; then   # long option: reformulate OPT and OPTARG
     OPT="${OPTARG%%=*}"       # extract long option name
@@ -123,25 +184,9 @@ while getopts eushf:cm:l:-: OPT; do
   fi
   case "$OPT" in
     h | help )
-            echo -e "\033[1m$script_name_cap - help\033[0m"
-            echo ""
-            echo "Usage : $script_bin [option]"
-            echo ""
-            echo "Available options:"
-            echo "[value*] means optional argument"
-            echo ""
-            echo " -h or --help                              : this help menu"
-            echo " -u or --update                            : update this script"
-            echo " -m [value] or --mode=[value]              : change display mode (full)"
-            echo " -l [value] or --language=[value]          : override language (fr or en)"
-            echo " -c or --cron-log                          : display latest cron log"
-            echo " -e [value*] or --edit-config=[value*]     : edit config file (default: nano)"
-            echo " -s [value*] or --status=[value*]          : status/enable/disable the script"
-            echo " -f \"[value]\" or --find=\"[value]\"          : find something in the logs"
-            echo " --add-skip_list=[value]                   : add a value to skip_list"
-            echo " --remove-skip_list=[value]                : remove a value from skip_list"
-            echo " --add-banned_teams=[value]                : add a team to banned_teams"
-            echo " --remove-banned_teams=[value]             : remove a team from banned_teams"
+            echo -e "\033[1m$(msg help_title "$script_name_cap")\033[0m"
+            echo
+            msg help "$script_bin"
             exit 0
             ;;
     add-skip_list )
@@ -167,69 +212,69 @@ while getopts eushf:cm:l:-: OPT; do
     f | find )
             needs_arg
             arg_search_value="$OPTARG"
-            echo -e "\033[1m$script_name_cap - find feature\033[0m"
-            echo "This feature require root privileges"
+            echo -e "\033[1m$(msg find_title "$script_name_cap")\033[0m"
+            echo "$(msg root_required)"
             echo ""
-            echo "Checking for root privileges..."
+            echo "$(msg root_check)"
             source "$script_conf" 2>/dev/null
             if [[ "$sudo" == "" ]] && [[ "$EUID" != "0" ]]; then
-              echo "No root privileges... exit"
+              echo "$(msg root_missing)"
             else
-              echo "Root privileges granted"
+              echo "$(msg root_granted)"
             fi
-            echo "Updating db..."
+            echo "$(msg db_updating)"
             echo "$sudo" | sudo -kS updatedb 2>/dev/null
             logs_path=`echo "$sudo" | sudo -kS locate -r "/$script_name/logs$" 2>/dev/null`
-            echo "Searching..."
+            echo "$(msg searching)"
             for log_path in $logs_path ; do
               my_logs=( `echo "$sudo" | sudo -kS find $log_path -type f 2>/dev/null` )
-              for my_log in ${my_logs[@]} ; do
-                echo "$sudo" | sudo -kS grep -Hin "$arg_search_value" $my_log 2>/dev/null
+              for my_log in "${my_logs[@]}" ; do
+                echo "$sudo" | sudo -kS grep -Hin "$arg_search_value" "$my_log" 2>/dev/null
               done
             done
             exit 0
             ;;
     u | update )
-            echo -e "\033[1m$script_name_cap - Update initiated\033[0m"
-            read -n 1 -p "Do you want to proceed [y/N]:" yn
+            echo -e "\033[1m$(msg update_title "$script_name_cap")\033[0m"
+            read -r -n 1 -p "$(msg update_confirm)" yn
             printf "\r                                                     "
-            if [[ "${yn}" == @(y|Y) ]]; then
+            if [[ "${yn}" == @(y|Y|o|O) ]]; then
               echo ""
               this_script=$(realpath -s "$0")
-              echo "Script location : "$this_script
+              echo "$(msg script_location "$this_script")"
               if curl -m 2 --head --silent --fail "$script_remote" 2>/dev/null >/dev/null; then
-                echo "Script available online on GitHub "
+                echo "$(msg script_online)"
                 md5_local=`md5sum "$this_script" | cut -f1 -d" " 2>/dev/null`
                 md5_remote=`curl -s "$script_remote" | md5sum | cut -f1 -d" "`
-                echo "MD5 local  : "$md5_local
-                echo "MD5 remote : "$md5_remote
+                echo "$(msg md5_local "$md5_local")"
+                echo "$(msg md5_remote "$md5_remote")"
                 if [[ "$md5_local" != "$md5_remote" ]]; then
-                  echo "A new version of the script is available... downloading"
+                  echo "$(msg update_available)"
                   curl -s -m 3 --create-dir -o "$this_script" "$script_remote"
-                  echo "Update completed... exit"
+                  echo "$(msg update_complete)"
                 else
-                  echo "The script is up to date... exit"
+                  echo "$(msg script_current)"
                 fi
               else
                 echo ""
-                echo "Script offline"
+                echo "$(msg script_offline)"
               fi
             else
               echo ""
-              echo "Nothing was done"
+              echo "$(msg nothing_done)"
             fi
             exit 0
             ;;
     c | cron-log )
-            echo -e "\033[1m$script_name_cap - latest cron log\033[0m"
+            echo -e "\033[1m$(msg cron_log_title "$script_name_cap")\033[0m"
             echo ""
             if [[ -f "$script_cron_log" ]]; then
               date_log=`date -r "$script_cron_log" `
               cat "$script_cron_log"
               echo ""
-              echo "Log created : "$date_log
+              echo "$(msg log_created "$date_log")"
             else
-              echo "No log found"
+              echo "$(msg no_log)"
             fi
             exit 0
             ;;
@@ -237,93 +282,94 @@ while getopts eushf:cm:l:-: OPT; do
             needs_arg
             arg_display_mode="$OPTARG"
             display_mode_supported=( "full" )
-            echo -e "\033[1m$script_name_cap - display mode override\033[0m"
+            echo -e "\033[1m$(msg mode_title "$script_name_cap")\033[0m"
             echo ""
-            if [[ "${display_mode_supported[@]}" =~ "$arg_display_mode" ]]; then
-              echo "Display mode activated: $arg_display_mode"
+            if [[ "$arg_display_mode" == "full" ]]; then
+              echo "$(msg mode_enabled "$arg_display_mode")"
             else
-              echo "Display mode $arg_display_mode not supported yet"
+              echo "$(msg mode_unsupported "$arg_display_mode")"
               exit 0
             fi
             ;;
     l | language )
             needs_arg
-            display_language="$OPTARG"
-            language_supported=( "fr" "en" )
+            selected_language="${OPTARG%%.*}"
+            selected_language="${selected_language%%_*}"
+            selected_language="${selected_language,,}"
             echo
-            if [[ "${language_supported[@]}" =~ "$display_language" ]]; then
-              echo "Language selected : $display_language"
+            if [[ "$selected_language" == "fr" || "$selected_language" == "en" ]]; then
+              echo "$(msg language_selected "$selected_language")"
             else
-              echo "Language $display_language not supported yet"
-              exit 0
+              echo "$(msg language_fallback "$OPTARG")"
             fi
             ;;
     e | edit-config )
             eval next_arg=\${$OPTIND}
             if [[ "$next_arg" == "" ]]; then
-              echo -e "\033[1m$script_name_cap - config editor\033[0m"
+              echo -e "\033[1m$(msg editor_title "$script_name_cap")\033[0m"
               echo ""
-              echo "No editor specified, using default (nano)"
+              echo "$(msg editor_default)"
               nano "$script_conf"
               exit 0
             else
-              echo -e "\033[1m$script_name_cap - config editor\033[0m"
+              echo -e "\033[1m$(msg editor_title "$script_name_cap")\033[0m"
               echo ""
               if command -v $next_arg ; then
-                echo "Editing config with: $next_arg"
+                echo "$(msg editor_using "$next_arg")"
                 $next_arg "$script_conf"
               else
-                echo "There is no software called \"$next_arg\" installed"
+                echo "$(msg editor_missing "$next_arg")"
               fi
               exit 0
             fi
             ;;
     s | status )
-            echo -e "\033[1m$script_name_cap - status (cron)\033[0m"
+            echo -e "\033[1m$(msg status_title "$script_name_cap")\033[0m"
             echo ""
             eval next_arg=\${$OPTIND}
             if [[ "$next_arg" == @(|status) ]]; then
-              echo "Checking scheduler status..."
+              echo "$(msg scheduler_check)"
               crontab -l > "$script_tmp_folder/my_old_cron.txt"
               cron_check=`cat "$script_tmp_folder/my_old_cron.txt" | grep $script_name`
               if [[ "$cron_check" != "" ]]; then
-                echo "- script was added in the cron"
+                echo "$(msg cron_added)"
                 cron_status=`cat "$script_tmp_folder/my_old_cron.txt" | grep $script_name | grep "^#"`
                 if [[ "$cron_status" == "" ]]; then
-                  echo "- script is currently enabled"
+                  echo "$(msg cron_enabled)"
                 else
-                  echo "- script is currently disabled"
+                  echo "$(msg cron_disabled)"
                 fi
               else
-                echo "- script wasn't added in the cron"
+                echo "$(msg cron_not_added)"
               fi
             elif [[ "$next_arg" == "enable" ]]; then
-              echo "Enabling the script in the cron"
+              echo "$(msg cron_enabling)"
               crontab -l > "$script_tmp_folder/my_old_cron.txt"
               safety_check=`cat "$script_tmp_folder/my_old_cron.txt" | grep $script_name | grep "^#"`
               if [[ "$safety_check" != "" ]]; then
                 cat "$script_tmp_folder/my_old_cron.txt" | grep $script_name | sed  's/^#//' > "$script_tmp_folder/my_new_cron.txt"
                 crontab "$script_tmp_folder/my_new_cron.txt"
               else
-                echo "Script is already enabled"
+                echo "$(msg already_enabled)"
               fi
             elif [[ "$next_arg" == "disable" ]]; then
-              echo "Disabling the script in the cron"
+              echo "$(msg cron_disabling)"
               crontab -l > "$script_tmp_folder/my_old_cron.txt"
               safety_check=`cat "$script_tmp_folder/my_old_cron.txt" | grep $script_name | grep "^#"`
               if [[ "$safety_check" == "" ]]; then
                 cat "$script_tmp_folder/my_old_cron.txt" | grep $script_name | sed 's/^/#/' > "$script_tmp_folder/my_new_cron.txt"
                 crontab "$script_tmp_folder/my_new_cron.txt"
               else
-                echo "Script is already disabled"
+                echo "$(msg already_disabled)"
               fi
             fi
             rm "$script_tmp_folder/my_old_cron.txt" 2>/dev/null
             rm "$script_tmp_folder/my_new_cron.txt" 2>/dev/null
             exit 0
             ;;
-    ??* )          die "Illegal option --$OPT" ;;  # bad long option
-    ? )            exit 2 ;;  # bad short option (error reported via getopts)
+    ??* )          die "$(msg illegal_option "$OPT")" ;;
+    : )            die "$(msg missing_option_arg "$OPTARG")" ;;
+    ? )            die "$(msg illegal_option "$OPTARG")" ;;
   esac
 done
 shift $((OPTIND-1)) # remove parsed options and args from $@ list
@@ -341,36 +387,32 @@ exec > >(tee -a "$execution_log") 2>&1
 
 #######################
 ## Script configuration
-push_notification_added_default='Film : $filebot_name\nFichier : $enabled_name\nTorrent : $torrent_name\nCodec : $torrent_codec\nNote IMDb : $imdb_rating\nDestination : $transmission_folder\nÉtat : $transmission_state\n\nSynopsis : $movie_synopsis'
-push_notification_stopped_default='Torrent: $torrent_name'
-settings_variables=( sudo c411_api_key transmission_login transmission_password transmission_ip transmission_port transmission_torrent_paused plex_sort_folder skip_list banned_teams approved_teams resolution_preference codec_preference imdb_minimum filebot_films filebot_films_H265 push_token_app push_target push_ignored push_notification_added push_notification_stopped )
-required_settings=( c411_api_key transmission_login transmission_password transmission_ip transmission_port plex_sort_folder filebot_films )
+push_notification_movie_added_default="${MUI[notification_movie]}"
+push_notification_serie_added_default="${MUI[notification_series]}"
+push_notification_stopped_default="${MUI[notification_stopped]}"
+settings_variables=( sudo c411_api_key betaseries_api_key betaseries_api_secret betaseries_token plex_section_series transmission_login transmission_password transmission_ip transmission_port transmission_torrent_paused plex_sort_folder skip_list banned_teams approved_teams resolution_preference codec_preference imdb_minimum filebot_films filebot_films_H265 filebot_series filebot_series_H265 push_token_app push_target push_ignored push_notification_movie_added push_notification_serie_added push_notification_stopped )
+required_settings=( c411_api_key transmission_login transmission_password transmission_ip transmission_port plex_sort_folder filebot_films filebot_series )
 edit_conf=0
 mkdir -p "$(dirname "$script_conf")"
 touch "$script_conf"
+chmod 600 "$script_conf"
 for script_variable in "${settings_variables[@]}"; do
   if ! grep -qE "^[[:space:]]*${script_variable}[[:space:]]*=" "$script_conf"; then
     case "$script_variable" in
-      push_notification_added)
-        printf 'push_notification_added="%s"\n' "$push_notification_added_default" >> "$script_conf"
+      push_notification_movie_added)
+        printf 'push_notification_movie_added="%s"\n' "$push_notification_movie_added_default" >> "$script_conf"
+        ;;
+      push_notification_serie_added)
+        printf 'push_notification_serie_added="%s"\n' "$push_notification_serie_added_default" >> "$script_conf"
         ;;
       push_notification_stopped)
         printf 'push_notification_stopped="%s"\n' "$push_notification_stopped_default" >> "$script_conf"
-        ;;
-      imdb_minimum)
-        printf 'imdb_minimum=""\n' >> "$script_conf"
-        ;;
-      resolution_preference)
-        printf 'resolution_preference=""\n' >> "$script_conf"
         ;;
       transmission_torrent_paused)
         printf 'transmission_torrent_paused="no"\n' >> "$script_conf"
         ;;
       skip_list)
         printf 'skip_list="remux|vostfr|hdtv"\n' >> "$script_conf"
-        ;;
-      banned_teams)
-        printf 'banned_teams=""\n' >> "$script_conf"
         ;;
       *)
         printf '%s=""\n' "$script_variable" >> "$script_conf"
@@ -380,31 +422,45 @@ for script_variable in "${settings_variables[@]}"; do
   fi
 done
 if (( edit_conf )); then
-  echo "Edit your configuration."
-  echo "Use $script_bin -e"
+  echo "$(msg edit_configuration)"
+  echo "$(msg use_edit "$script_bin")"
   exit 0
 fi
 
 # Read the template literally so variables inside double quotes are expanded
 # only when the notification is created, not when the config is sourced.
-push_notification_added_literal=""
+push_notification_movie_added_literal=""
+push_notification_serie_added_literal=""
 push_notification_stopped_literal=""
 while IFS= read -r config_line; do
-  if [[ "$config_line" =~ ^[[:space:]]*push_notification_added[[:space:]]*=(.*)$ ]]; then
-    push_notification_added_literal="${BASH_REMATCH[1]}"
+  if [[ "$config_line" =~ ^[[:space:]]*push_notification_movie_added[[:space:]]*=(.*)$ ]]; then
+    push_notification_movie_added_literal="${BASH_REMATCH[1]}"
+  elif [[ "$config_line" =~ ^[[:space:]]*push_notification_serie_added[[:space:]]*=(.*)$ ]]; then
+    push_notification_serie_added_literal="${BASH_REMATCH[1]}"
   elif [[ "$config_line" =~ ^[[:space:]]*push_notification_stopped[[:space:]]*=(.*)$ ]]; then
     push_notification_stopped_literal="${BASH_REMATCH[1]}"
   fi
 done < "$script_conf"
-push_notification_added_literal=$(
-  printf '%s' "$push_notification_added_literal" |
+push_notification_movie_added_literal=$(
+  printf '%s' "$push_notification_movie_added_literal" |
   sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 )
-if (( ${#push_notification_added_literal} >= 2 )); then
-  first_quote="${push_notification_added_literal:0:1}"
-  last_quote="${push_notification_added_literal: -1}"
+if (( ${#push_notification_movie_added_literal} >= 2 )); then
+  first_quote="${push_notification_movie_added_literal:0:1}"
+  last_quote="${push_notification_movie_added_literal: -1}"
   if [[ ( "$first_quote" == '"' && "$last_quote" == '"' ) || ( "$first_quote" == "'" && "$last_quote" == "'" ) ]]; then
-    push_notification_added_literal="${push_notification_added_literal:1:${#push_notification_added_literal}-2}"
+    push_notification_movie_added_literal="${push_notification_movie_added_literal:1:${#push_notification_movie_added_literal}-2}"
+  fi
+fi
+push_notification_serie_added_literal=$(
+  printf '%s' "$push_notification_serie_added_literal" |
+  sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+)
+if (( ${#push_notification_serie_added_literal} >= 2 )); then
+  first_quote="${push_notification_serie_added_literal:0:1}"
+  last_quote="${push_notification_serie_added_literal: -1}"
+  if [[ ( "$first_quote" == '"' && "$last_quote" == '"' ) || ( "$first_quote" == "'" && "$last_quote" == "'" ) ]]; then
+    push_notification_serie_added_literal="${push_notification_serie_added_literal:1:${#push_notification_serie_added_literal}-2}"
   fi
 fi
 push_notification_stopped_literal=$(
@@ -419,12 +475,35 @@ if (( ${#push_notification_stopped_literal} >= 2 )); then
   fi
 fi
 source "$script_conf"
-push_notification_added="${push_notification_added_literal:-$push_notification_added_default}"
+push_notification_movie_added="${push_notification_movie_added_literal:-$push_notification_movie_added_default}"
+push_notification_serie_added="${push_notification_serie_added_literal:-$push_notification_serie_added_default}"
 push_notification_stopped="${push_notification_stopped_literal:-$push_notification_stopped_default}"
+
+save-config-value() {
+  local setting_name="$1" setting_value="$2" line temp_file written=0
+  local setting_pattern="^[[:space:]]*${setting_name}[[:space:]]*="
+
+  temp_file=$(mktemp "$(dirname "$script_conf")/.${script_name}.conf.XXXXXX") || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ $setting_pattern ]]; then
+      if (( ! written )); then
+        printf '%s=%q\n' "$setting_name" "$setting_value" >> "$temp_file"
+        written=1
+      fi
+    else
+      printf '%s\n' "$line" >> "$temp_file"
+    fi
+  done < "$script_conf"
+  if (( ! written )); then
+    printf '%s=%q\n' "$setting_name" "$setting_value" >> "$temp_file"
+  fi
+  chmod 600 "$temp_file"
+  mv -f "$temp_file" "$script_conf"
+}
 
 transmission_torrent_paused="${transmission_torrent_paused,,}"
 if [[ "$transmission_torrent_paused" != "yes" && "$transmission_torrent_paused" != "no" ]]; then
-  echo "Invalid transmission_torrent_paused value: $transmission_torrent_paused (expected: yes or no)"
+  echo "$(msg invalid_paused "$transmission_torrent_paused")"
   exit 1
 fi
 
@@ -446,7 +525,7 @@ case "$resolution_preference" in
     resolution_target_standard="720p"
     ;;
   *)
-    echo "Invalid resolution_preference value: $resolution_preference (expected: 720p, 1080p or 4K)"
+    echo "$(msg invalid_resolution "$resolution_preference")"
     exit 1
     ;;
 esac
@@ -454,7 +533,7 @@ esac
 imdb_minimum="${imdb_minimum//,/.}"
 if [[ -n "$imdb_minimum" ]]; then
   if [[ ! "$imdb_minimum" =~ ^[0-9]+([.][0-9]+)?$ ]] || ! awk -v minimum="$imdb_minimum" 'BEGIN { exit !(minimum >= 0 && minimum <= 10) }'; then
-    echo "Invalid imdb_minimum value: $imdb_minimum (expected: 0 to 10)"
+    echo "$(msg invalid_imdb "$imdb_minimum")"
     exit 1
   fi
 fi
@@ -490,7 +569,7 @@ if [[ -r "$conky_conf" ]]; then
       printf -v "$variable" '%s' "$value"
       printf -v escaped_value '%q' "$value"
       sed -i -E "s|^[[:space:]]*${variable}[[:space:]]*=.*$|${variable}=\"${escaped_value}\"|" "$script_conf"
-      echo "Configuration imported and saved: $variable from $conky_conf"
+      echo "$(msg config_imported "$variable" "$conky_conf")"
     fi
   done
 fi
@@ -503,7 +582,7 @@ if [[ -z "${plex_sort_folder:-}" ]]; then
     else
       printf 'plex_sort_folder="%s"\n' "$plex_sort_folder" >> "$script_conf"
     fi
-    echo "Configuration imported and saved: plex_sort_folder from $plex_sort_conf"
+    echo "$(msg config_imported plex_sort_folder "$plex_sort_conf")"
   fi
 fi
 plex_sort_config="$plex_sort_folder/plex_sort.conf"
@@ -517,34 +596,35 @@ if [[ -r "$plex_sort_config" ]]; then
   fi
 fi
 if [[ -n "$download_folder" ]]; then
-  if [[ -z "${filebot_films:-}" || -z "${filebot_films_H265:-}" ]]; then
+  if [[ -z "${filebot_films:-}" || -z "${filebot_films_H265:-}" || -z "${filebot_series:-}" || -z "${filebot_series_H265:-}" ]]; then
     while IFS= read -r folder; do
       folder_name_lower=${folder##*/}
       folder_name_lower=${folder_name_lower,,}
       [[ "$folder_name_lower" == *filebot* ]] || continue
-      [[ "$folder_name_lower" == *films* ]] || continue
-      if [[ "$folder_name_lower" == *h265* ]]; then
-        filebot_films_H265="$folder"
-      else
-        filebot_films="$folder"
+      if [[ "$folder_name_lower" == *films* ]]; then
+        if [[ "$folder_name_lower" == *h265* ]]; then
+          filebot_films_H265="$folder"
+        else
+          filebot_films="$folder"
+        fi
+      elif [[ "$folder_name_lower" == *series* ]]; then
+        if [[ "$folder_name_lower" == *h265* ]]; then
+          filebot_series_H265="$folder"
+        else
+          filebot_series="$folder"
+        fi
       fi
     done < <(find "$download_folder" -mindepth 1 -maxdepth 1 -type d)
-    if [[ -n "${filebot_films:-}" ]]; then
-      if grep -qE '^filebot_films=' "$script_conf"; then
-        sed -i "s|^filebot_films=.*|filebot_films=\"$filebot_films\"|" "$script_conf"
+    for variable in filebot_films filebot_films_H265 filebot_series filebot_series_H265; do
+      value=${!variable:-}
+      [[ -n "$value" ]] || continue
+      if grep -qE "^${variable}=" "$script_conf"; then
+        sed -i "s|^${variable}=.*|${variable}=\"$value\"|" "$script_conf"
       else
-        printf 'filebot_films="%s"\n' "$filebot_films" >> "$script_conf"
+        printf '%s="%s"\n' "$variable" "$value" >> "$script_conf"
       fi
-      echo "Configuration imported and saved: filebot_films=$filebot_films"
-    fi
-    if [[ -n "${filebot_films_H265:-}" ]]; then
-      if grep -qE '^filebot_films_H265=' "$script_conf"; then
-        sed -i "s|^filebot_films_H265=.*|filebot_films_H265=\"$filebot_films_H265\"|" "$script_conf"
-      else
-        printf 'filebot_films_H265="%s"\n' "$filebot_films_H265" >> "$script_conf"
-      fi
-      echo "Configuration imported and saved: filebot_films_H265=$filebot_films_H265"
-    fi
+      echo "$(msg config_imported_value "$variable" "$value")"
+    done
   fi
 fi
 
@@ -554,12 +634,12 @@ fi
 missing_value=0
 for variable in "${required_settings[@]}"; do
   if [[ -z "${!variable:-}" ]]; then
-    echo "Missing configuration: $variable"
+    echo "$(msg missing_config "$variable")"
     missing_value=1
   fi
 done
 if (( missing_value )); then
-  echo "Use $script_bin -e"
+  echo "$(msg use_edit "$script_bin")"
   exit 1
 fi
 
@@ -592,7 +672,7 @@ ui_tag_processed="[...]"
 ui_tag_warning="[\e[43m \u2713 \e[0m]"
 ui_tag_section="\e[44m[\u2263\u2263\u2263]\e[0m \e[44m \e[1m %-*s  \e[0m \e[44m  \e[0m \e[44m \e[0m \e[34m\u2759\e[0m\n"
 printf "\e[46m \u23E5\u23E5\u23E5 \e[0m \e[46m \e[1m %-61s  \e[0m \e[46m  \e[0m \e[46m \e[0m \e[36m\u2759\e[0m\n" "$script_name_cap"
-echo -e "$ui_tag_processed Execution log: $execution_log"
+echo -e "$ui_tag_processed $(msg execution_log "$execution_log")"
 
 
 #######################
@@ -618,7 +698,7 @@ push-message() {
 
   if [[ -n "$push_url" ]]; then
     curl_args+=(--form-string "url=$push_url")
-    curl_args+=(--form-string "url_title=${push_url_title:-Voir sur The Movie Database}")
+    curl_args+=(--form-string "url_title=${push_url_title:-$(msg view_tmdb)}")
   fi
   if [[ -s "$push_attachment" ]]; then
     curl_args+=(--form "attachment=@$push_attachment;type=image/jpeg")
@@ -628,7 +708,7 @@ push-message() {
 }
 
 render-push-notification() (
-  local notification="$push_notification_added"
+  local notification="$1"
 
   # Keep replacement values literal, notably ampersands in titles and plots.
   shopt -u patsub_replacement 2>/dev/null || true
@@ -637,6 +717,8 @@ render-push-notification() (
   notification="${notification//\$title/$title}"
   notification="${notification//\$\{enabled_name\}/$enabled_name}"
   notification="${notification//\$enabled_name/$enabled_name}"
+  notification="${notification//\$\{episode_name\}/$enabled_name}"
+  notification="${notification//\$episode_name/$enabled_name}"
   notification="${notification//\$\{torrent_name\}/$torrent_name}"
   notification="${notification//\$torrent_name/$torrent_name}"
   notification="${notification//\$\{torrent_codec\}/$torrent_codec}"
@@ -647,6 +729,8 @@ render-push-notification() (
   notification="${notification//\$transmission_state/$transmission_state}"
   notification="${notification//\$\{movie_name\}/$movie_name}"
   notification="${notification//\$movie_name/$movie_name}"
+  notification="${notification//\$\{serie_name\}/$movie_name}"
+  notification="${notification//\$serie_name/$movie_name}"
   notification="${notification//\$\{filebot_name\}/$movie_name}"
   notification="${notification//\$filebot_name/$movie_name}"
   notification="${notification//\$\{imdb_rating\}/$imdb_rating}"
@@ -663,6 +747,10 @@ render-push-notification() (
   notification="${notification//\$movie_tmdb_id/$movie_tmdb_id}"
   notification="${notification//\$\{tmdb_url\}/$movie_tmdb_url}"
   notification="${notification//\$tmdb_url/$movie_tmdb_url}"
+  notification="${notification//\$\{tvdb_id\}/$series_tvdb_id}"
+  notification="${notification//\$tvdb_id/$series_tvdb_id}"
+  notification="${notification//\$\{tvdb_url\}/$series_tvdb_url}"
+  notification="${notification//\$tvdb_url/$series_tvdb_url}"
   notification="${notification//\$\{synopsis\}/$movie_synopsis}"
   notification="${notification//\$synopsis/$movie_synopsis}"
   notification="${notification//\$\{movie_synopsis\}/$movie_synopsis}"
@@ -695,7 +783,7 @@ render-stopped-push-notification() (
 function display_loading() {
   pid="$*"
   if [[ "$mui_loading_spinner" == "" ]]; then                                               ## MUI
-    mui_loading_spinner="Loading..."                                                        ##
+    mui_loading_spinner="$(msg loading)"                                                    ##
   fi                                                                                        ##
   lengh_spinner=${#mui_loading_spinner}
   if [[ "$loading_spinner" == "" ]]; then
@@ -752,16 +840,39 @@ get-movie-metadata() {
   fi
 
   if [[ -z "${movie_synopsis//[[:space:]]/}" ]]; then
-    movie_synopsis="Synopsis indisponible."
+    movie_synopsis="$(msg synopsis_unavailable)"
   elif (( ${#movie_synopsis} > 600 )); then
     movie_synopsis="${movie_synopsis:0:597}..."
   fi
-  [[ "$movie_imdb_rating" =~ ^[0-9]+([.][0-9]+)?$ ]] || movie_imdb_rating="Indisponible"
-  [[ "$movie_imdb_id" =~ ^tt[0-9]+$ ]] || movie_imdb_id="Indisponible"
+  [[ "$movie_imdb_rating" =~ ^[0-9]+([.][0-9]+)?$ ]] || movie_imdb_rating="$(msg unavailable)"
+  [[ "$movie_imdb_id" =~ ^tt[0-9]+$ ]] || movie_imdb_id="$(msg unavailable)"
   if [[ "$movie_tmdb_id" =~ ^[0-9]+$ ]]; then
     movie_tmdb_url="https://www.themoviedb.org/movie/$movie_tmdb_id?language=fr-FR"
   else
-    movie_tmdb_id="Indisponible"
+    movie_tmdb_id="$(msg unavailable)"
+  fi
+  if [[ "$movie_poster_url" == https://image.tmdb.org/t/p/* ]]; then
+    movie_poster_url="${movie_poster_url/\/original\//\/w500\/}"
+  else
+    movie_poster_url=""
+  fi
+}
+
+get-series-metadata() {
+  local series_query="$1"
+  local metadata
+  local metadata_format=$'{tvdbid}\x1f{info.Poster}'
+
+  series_tvdb_id=""
+  series_tvdb_url=""
+  movie_poster_url=""
+  metadata=$(filebot -list --q "$series_query" --db TheMovieDB::TV --format "$metadata_format" --log OFF 2>/dev/null)
+  IFS=$'\x1f' read -r series_tvdb_id movie_poster_url <<< "${metadata%%$'\n'*}"
+
+  if [[ "$series_tvdb_id" =~ ^[0-9]+$ ]]; then
+    series_tvdb_url="https://thetvdb.com/dereferrer/series/$series_tvdb_id"
+  else
+    series_tvdb_id="$(msg unavailable)"
   fi
   if [[ "$movie_poster_url" == https://image.tmdb.org/t/p/* ]]; then
     movie_poster_url="${movie_poster_url/\/original\//\/w500\/}"
@@ -865,6 +976,240 @@ release_team_from_name() {
   return 1
 }
 
+get-betaseries-member-id() {
+  local response_file="$1" http_code
+
+  [[ -n "${betaseries_token:-}" ]] || return 1
+  if ! http_code=$(curl --silent --show-error \
+    --connect-timeout 10 \
+    --max-time 30 \
+    --output "$response_file" \
+    --write-out '%{http_code}' \
+    --header "X-BetaSeries-Key: $betaseries_api_key" \
+    --header 'X-BetaSeries-Version: 3.0' \
+    --header "Authorization: Bearer $betaseries_token" \
+    --header "User-Agent: $script_name/1.0" \
+    'https://api.betaseries.com/members/infos'); then
+    return 2
+  fi
+  betaseries_member_id=$(jq -r '.member.id // empty' "$response_file" 2>/dev/null)
+  [[ "$http_code" =~ ^2[0-9][0-9]$ && -n "$betaseries_member_id" ]]
+}
+
+request-betaseries-token() {
+  local response_file="$1" access_token device_code expires_at expires_in interval user_code verification_url
+
+  if [[ ! -t 0 ]]; then
+    echo "$(msg oauth_interactive)" >&2
+    return 1
+  fi
+  if [[ -z "${betaseries_api_secret:-}" ]]; then
+    read -r -s -p "$(msg oauth_secret)" betaseries_api_secret
+    echo
+  fi
+  [[ -n "$betaseries_api_secret" ]] || return 1
+
+  if ! curl --silent --show-error --fail-with-body \
+    --connect-timeout 10 \
+    --max-time 30 \
+    --request POST \
+    --output "$response_file" \
+    --header "X-BetaSeries-Key: $betaseries_api_key" \
+    --header 'X-BetaSeries-Version: 3.0' \
+    --header "User-Agent: $script_name/1.0" \
+    'https://api.betaseries.com/oauth/device'; then
+    return 1
+  fi
+
+  device_code=$(jq -r '.device_code // empty' "$response_file")
+  user_code=$(jq -r '.user_code // empty' "$response_file")
+  verification_url=$(jq -r '.verification_url // empty' "$response_file")
+  expires_in=$(jq -r '.expires_in // 1800' "$response_file")
+  interval=$(jq -r '.interval // 5' "$response_file")
+  [[ -n "$device_code" && -n "$user_code" && -n "$verification_url" ]] || return 1
+
+  msg oauth_open "$verification_url" "$user_code"
+  msg oauth_waiting
+  expires_at=$(( $(date +%s) + expires_in ))
+  while (( $(date +%s) < expires_at )); do
+    sleep "$interval"
+    printf '.'
+    if curl --silent --show-error \
+      --connect-timeout 10 \
+      --max-time 30 \
+      --request POST \
+      --output "$response_file" \
+      --header "X-BetaSeries-Key: $betaseries_api_key" \
+      --header 'X-BetaSeries-Version: 3.0' \
+      --data-urlencode "client_id=$betaseries_api_key" \
+      --data-urlencode "client_secret=$betaseries_api_secret" \
+      --data-urlencode "code=$device_code" \
+      'https://api.betaseries.com/oauth/access_token'; then
+      access_token=$(jq -r '.access_token // empty' "$response_file" 2>/dev/null)
+      if [[ -n "$access_token" ]]; then
+        msg oauth_authorized
+        betaseries_token=$access_token
+        save-config-value betaseries_token "$betaseries_token" || return 1
+        return 0
+      fi
+    fi
+  done
+  msg oauth_expired >&2
+  return 1
+}
+
+generate-series-watchlist() {
+  local destination="$1" temp_dir response_file beta_file plex_file merged_file http_code betaseries_count
+  local plex_conf="$HOME/.conky/conky-nas.conf" plex_ip plex_port plex_token plex_scheme plex_host plex_base_url
+  local plex_section_key auth_status betaseries_available
+  local -a plex_settings
+
+  [[ -n "${plex_section_series:-}" ]] || {
+    echo "$(msg missing_plex_section)" >&2
+    return 1
+  }
+  [[ -r "$plex_conf" ]] || return 1
+
+  temp_dir=$(mktemp -d "$script_tmp_folder/c411-watchlist.XXXXXX") || return 1
+  response_file="$temp_dir/response.json"
+  beta_file="$temp_dir/betaseries.jsonl"
+  plex_file="$temp_dir/plex.jsonl"
+  merged_file="$temp_dir/merged.jsonl"
+  : > "$beta_file"
+
+  betaseries_available=0
+  if [[ -n "${betaseries_api_key:-}" ]]; then
+    get-betaseries-member-id "$response_file"
+    auth_status=$?
+    if (( auth_status == 0 )); then
+      betaseries_available=1
+    elif (( auth_status == 1 )); then
+      echo "$(msg beta_token_invalid)"
+      if request-betaseries-token "$response_file" && get-betaseries-member-id "$response_file"; then
+        betaseries_available=1
+      else
+        echo "$(msg beta_plex_only)" >&2
+      fi
+    else
+      echo "$(msg beta_unreachable)" >&2
+    fi
+  else
+    echo "$(msg beta_not_configured)"
+  fi
+
+  if (( betaseries_available )); then
+    if http_code=$(curl --silent --show-error \
+      --connect-timeout 10 \
+      --max-time 30 \
+      --get \
+      --data-urlencode "id=$betaseries_member_id" \
+      --output "$response_file" \
+      --write-out '%{http_code}' \
+      --header "X-BetaSeries-Key: $betaseries_api_key" \
+      --header 'X-BetaSeries-Version: 3.0' \
+      --header "Authorization: Bearer $betaseries_token" \
+      --header "User-Agent: $script_name/1.0" \
+      'https://api.betaseries.com/shows/member') &&
+       [[ "$http_code" =~ ^2[0-9][0-9]$ ]] &&
+       jq -e '.shows | type == "array"' "$response_file" >/dev/null 2>&1; then
+      if ! jq -c '
+        .shows[]? | {
+          key: (if (.imdb_id // "") != "" then "imdb://\(.imdb_id)" elif (.thetvdb_id // 0) != 0 then "tvdb://\(.thetvdb_id)" else "title://\(.title | ascii_downcase)/\(.creation // 0)" end),
+          title, year: (.creation // null), studio: null,
+          tvdb_id: (if (.thetvdb_id // 0) != 0 then (.thetvdb_id | tostring) else null end),
+          imdb_id: (if (.imdb_id // "") != "" then .imdb_id else null end),
+          tmdb_id: null, source: "betaseries"
+        }
+      ' "$response_file" > "$beta_file"; then
+        : > "$beta_file"
+        echo "$(msg beta_invalid_response)" >&2
+      else
+        betaseries_count=$(wc -l < "$beta_file")
+        echo -e "$ui_tag_ok $(msg beta_retrieved "$betaseries_count")"
+      fi
+    else
+      echo "$(msg beta_retrieve_failed)" >&2
+    fi
+  fi
+
+  mapfile -d '' -t plex_settings < <(
+    plex_ip=""; plex_port=""; plex_token=""
+    source "$plex_conf"
+    printf '%s\0%s\0%s\0' "$plex_ip" "$plex_port" "$plex_token"
+  )
+  plex_ip=${plex_settings[0]:-localhost}
+  plex_port=${plex_settings[1]:-32400}
+  plex_token=${plex_settings[2]:-}
+  [[ -n "$plex_token" ]] || { rm -rf "$temp_dir"; return 1; }
+  plex_scheme=http
+  [[ "$plex_ip" == https://* ]] && plex_scheme=https
+  plex_host=${plex_ip#http://}; plex_host=${plex_host#https://}; plex_host=${plex_host%/}
+  plex_base_url="$plex_scheme://$plex_host:$plex_port"
+
+  if ! curl --silent --show-error --fail-with-body --connect-timeout 10 --max-time 30 \
+    --output "$response_file" --header 'Accept: application/json' --header "X-Plex-Token: $plex_token" \
+    "$plex_base_url/library/sections"; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  plex_section_key=$(jq -r --arg section "$plex_section_series" '
+    .MediaContainer.Directory[]? | select(.type == "show")
+    | select((.key | tostring) == $section or .title == $section) | .key
+  ' "$response_file")
+  if [[ -z "$plex_section_key" || "$plex_section_key" == *$'\n'* ]]; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  if ! curl --silent --show-error --fail-with-body --connect-timeout 10 --max-time 60 --get \
+    --data-urlencode 'type=2' --data-urlencode 'includeGuids=1' \
+    --output "$response_file" --header 'Accept: application/json' --header "X-Plex-Token: $plex_token" \
+    "$plex_base_url/library/sections/$plex_section_key/all"; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  if ! jq -e '.MediaContainer.Metadata // [] | type == "array"' "$response_file" >/dev/null 2>&1; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  if ! jq -c '
+    .MediaContainer.Metadata[]?
+    | ([.Guid[]?.id | select(startswith("tvdb://"))][0] // null) as $tvdb
+    | ([.Guid[]?.id | select(startswith("imdb://"))][0] // null) as $imdb
+    | ([.Guid[]?.id | select(startswith("tmdb://"))][0] // null) as $tmdb
+    | {key: ($imdb // $tvdb // $tmdb // "title://\(.title | ascii_downcase)/\(.year // 0)"),
+       title, year: (.year // null), studio: (.studio // null),
+       tvdb_id: ($tvdb | if . then sub("^tvdb://"; "") else null end),
+       imdb_id: ($imdb | if . then sub("^imdb://"; "") else null end),
+       tmdb_id: ($tmdb | if . then sub("^tmdb://"; "") else null end), source: "plex"}
+  ' "$response_file" > "$plex_file"; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+
+  if ! jq --compact-output --slurp '
+    group_by(.key)
+    | map(
+        . as $group
+        | ($group | map(select(.source == "plex"))[0] // $group[0]) as $preferred
+        | $preferred + {
+            tvdb_id: ($group | map(.tvdb_id) | map(select(. != null))[0] // null),
+            imdb_id: ($group | map(.imdb_id) | map(select(. != null))[0] // null),
+            tmdb_id: ($group | map(.tmdb_id) | map(select(. != null))[0] // null)
+          }
+      )
+    | sort_by(.title | ascii_downcase) | .[]
+  ' "$beta_file" "$plex_file" > "$merged_file"; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  if ! chmod 600 "$merged_file" || ! mv -f "$merged_file" "$destination"; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  rm -rf "$temp_dir"
+  return 0
+}
+
 
 #######################
 ## Check update
@@ -873,58 +1218,60 @@ if curl -m 2 --head --silent --fail "$script_remote" 2>/dev/null >/dev/null; the
   md5_local=`md5sum "$this_script" | cut -f1 -d" " 2>/dev/null`
   md5_remote=`curl -s "$script_remote" | md5sum | cut -f1 -d" "`
   if [[ "$md5_local" != "$md5_remote" ]]; then
-    echo -e "$ui_tag_warning Une nouvelle version du script est disponible..."
+    echo -e "$ui_tag_warning $(msg new_version)"
   else
-    echo -e "$ui_tag_ok Le script est à jour..."
+    echo -e "$ui_tag_ok $(msg up_to_date)"
   fi
 else
-  echo -e "$ui_tag_bad Script hors ligne..."
+  echo -e "$ui_tag_bad $(msg offline)"
 fi
 echo ""
 
 
 #######################
 ## Dependencies
-section_title="Checking dependencies"
+section_title="$(msg dependencies_title)"
 printf "$ui_tag_section" "$(lon2 "$section_title")" "$section_title"
 dependencies=( filebot awk wget xmlstarlet locate transmission-cli curl jq )
 missing=()
 for dependency in "${dependencies[@]}"; do
   if command -v "$dependency" >/dev/null 2>&1; then
-    echo -e "$ui_tag_ok Dependency: $dependency"
+    echo -e "$ui_tag_ok $(msg dependency "$dependency")"
   else
-    echo -e "$ui_tag_bad Missing dependency: $dependency"
-    echo -e "$ui_tag_warning Installing dependency..."
+    echo -e "$ui_tag_bad $(msg dependency_missing "$dependency")"
+    echo -e "$ui_tag_warning $(msg dependency_installing)"
     echo $sudo | sudo -kS apt install $dependency -y 2>/dev/null
     if $dependency -help > /dev/null 2>/dev/null ; then
-      echo -e "$ui_tag_ok Dependency: $dependency"
+      echo -e "$ui_tag_ok $(msg dependency "$dependency")"
     else
-      echo -e "$ui_tag_bad manual install required: $dependency"
+      echo -e "$ui_tag_bad $(msg dependency_manual "$dependency")"
       missing+=("$dependency")
     fi                                                                                    ##
   fi
 done
 if ((${#missing[@]})); then
-    echo "Use sudo apt install ${missing[*]}"
+    echo "$(msg dependency_hint "${missing[*]}")"
     exit 1
 fi
 echo ""
 
 
 #######################
-## Get latest movies and download
-section_title="Downloading movies"
+## Get latest movies and series
+section_title="$(msg download_title)"
 printf "$ui_tag_section" $(lon2 "$section_title") "$section_title"
-rss_file="$script_folder/rss.xml"
+rss_movies_file="$script_folder/rss_movies.xml"
+rss_series_file="$script_folder/rss_series.xml"
 url_conf_file="$script_folder/url.conf"
 url_conf_temp=$(mktemp "$script_tmp_folder/c411-url.XXXXXX.conf")
 if ! wget -q -O "$url_conf_temp" "$url_conf_remote"; then
   rm -f "$url_conf_temp"
-  echo -e "$ui_tag_bad URL configuration not downloaded: $url_conf_remote"
+  echo -e "$ui_tag_bad $(msg url_config_failed "$url_conf_remote")"
   exit 1
 fi
 mv -f "$url_conf_temp" "$url_conf_file"
 rss_movies_url_template=""
+rss_series_url_template=""
 while IFS= read -r url_conf_line; do
   if [[ "$url_conf_line" =~ ^[[:space:]]*rss_movies_url[[:space:]]*=(.*)$ ]]; then
     rss_movies_url_template="${BASH_REMATCH[1]}"
@@ -932,44 +1279,126 @@ while IFS= read -r url_conf_line; do
     rss_movies_url_template="${rss_movies_url_template%\"}"
     rss_movies_url_template="${rss_movies_url_template#\'}"
     rss_movies_url_template="${rss_movies_url_template%\'}"
-    break
+  elif [[ "$url_conf_line" =~ ^[[:space:]]*rss_series_url[[:space:]]*=(.*)$ ]]; then
+    rss_series_url_template="${BASH_REMATCH[1]}"
+    rss_series_url_template="${rss_series_url_template#\"}"
+    rss_series_url_template="${rss_series_url_template%\"}"
+    rss_series_url_template="${rss_series_url_template#\'}"
+    rss_series_url_template="${rss_series_url_template%\'}"
   fi
 done < "$url_conf_file"
 rss_movies_url="${rss_movies_url_template//\$\{c411_api_key\}/$c411_api_key}"
 rss_movies_url="${rss_movies_url//\$c411_api_key/$c411_api_key}"
-if [[ "$rss_movies_url" != http://* && "$rss_movies_url" != https://* ]]; then
-  echo -e "$ui_tag_bad Invalid rss_movies_url in: $url_conf_remote"
-  exit 1
-fi
-echo -e "$ui_tag_ok RSS Movies URL loaded from: $url_conf_remote"
+rss_series_url="${rss_series_url_template//\$\{c411_api_key\}/$c411_api_key}"
+rss_series_url="${rss_series_url//\$c411_api_key/$c411_api_key}"
 
-rss_temp_file=$(mktemp "$script_tmp_folder/c411-rss.XXXXXX.xml")
-if ! wget -q -O "$rss_temp_file" "$rss_movies_url"; then
-  rm -f "$rss_temp_file"
-  echo -e "$ui_tag_bad RSS Movies file not downloaded"
-  exit 1
+download-rss() {
+  local media_label="$1" rss_url="$2" destination="$3" rss_temp_file
+
+  if [[ "$rss_url" != http://* && "$rss_url" != https://* ]]; then
+    echo -e "$ui_tag_bad $(msg rss_invalid_url "$media_label" "$url_conf_remote")"
+    return 1
+  fi
+  rss_temp_file=$(mktemp "$script_tmp_folder/c411-rss.XXXXXX.xml") || return 1
+  if ! wget -q -O "$rss_temp_file" "$rss_url"; then
+    rm -f "$rss_temp_file"
+    echo -e "$ui_tag_bad $(msg rss_download_failed "$media_label")"
+    return 1
+  fi
+  if ! xmlstarlet val -q "$rss_temp_file" 2>/dev/null ||
+     [[ "$(xmlstarlet sel -t -v 'local-name(/*)' "$rss_temp_file" 2>/dev/null)" != "rss" ]]; then
+    rm -f "$rss_temp_file"
+    echo -e "$ui_tag_bad $(msg rss_invalid_response "$media_label")"
+    return 1
+  fi
+  mv -f "$rss_temp_file" "$destination"
+  echo -e "$ui_tag_ok $(msg rss_downloaded "$media_label")"
+}
+
+download-rss "$(msg media_movies)" "$rss_movies_url" "$rss_movies_file" || exit 1
+
+series_enabled=1
+if [[ -z "${plex_section_series:-}" ]]; then
+  echo -e "$ui_tag_warning $(msg series_no_section)"
+  series_enabled=0
+elif [[ -z "${filebot_series:-}" || ! -d "$filebot_series" ]]; then
+  echo -e "$ui_tag_warning $(msg series_no_destination)"
+  series_enabled=0
+elif ! download-rss "$(msg media_series)" "$rss_series_url" "$rss_series_file"; then
+  echo -e "$ui_tag_warning $(msg series_no_rss)"
+  series_enabled=0
 fi
-if ! xmlstarlet val -q "$rss_temp_file" 2>/dev/null ||
-   [[ "$(xmlstarlet sel -t -v 'local-name(/*)' "$rss_temp_file" 2>/dev/null)" != "rss" ]]; then
-  rm -f "$rss_temp_file"
-  echo -e "$ui_tag_bad Invalid RSS response (C411 may be under maintenance)"
-  exit 1
+
+normalize-series-name() {
+  local value="${1,,}"
+  value=${value//œ/oe}
+  value=${value//æ/ae}
+  printf '%s' "$value" | sed 's/[^[:alnum:]]//g'
+}
+
+declare -A series_watchlist=()
+declare -A series_tmdb_watchlist=()
+declare -A series_imdb_watchlist=()
+declare -A series_title_ambiguous=()
+if (( series_enabled )); then
+  if ! generate-series-watchlist "$script_folder/series_watchlist.jsonl"; then
+    echo -e "$ui_tag_warning $(msg series_list_failed)"
+    series_enabled=0
+  else
+    while IFS=$'\x1f' read -r series_title watch_tmdb_id watch_imdb_id; do
+      series_key=$(normalize-series-name "$series_title")
+      if [[ -n "$series_key" ]]; then
+        if [[ -n "${series_watchlist[$series_key]:-}" ]]; then
+          series_title_ambiguous["$series_key"]=1
+        else
+          series_watchlist["$series_key"]="$series_title"
+        fi
+      fi
+      [[ "$watch_tmdb_id" =~ ^[0-9]+$ ]] && series_tmdb_watchlist["$watch_tmdb_id"]="$series_title"
+      [[ "$watch_imdb_id" =~ ^tt[0-9]+$ ]] && series_imdb_watchlist["$watch_imdb_id"]="$series_title"
+    done < <(jq -r '[.title, (.tmdb_id // ""), (.imdb_id // "")] | join("\u001f")' "$script_folder/series_watchlist.jsonl")
+    if ((${#series_watchlist[@]} == 0)); then
+      echo -e "$ui_tag_warning $(msg series_list_empty)"
+      series_enabled=0
+    fi
+  fi
 fi
-mv -f "$rss_temp_file" "$rss_file"
-echo -e "$ui_tag_ok RSS Movies file downloaded"
+if (( series_enabled )); then
+  echo -e "$ui_tag_ok $(msg series_loaded "${#series_watchlist[@]}")"
+fi
 echo " ----------------------------------------------------------------------------"
 
-while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
-  echo -e "$ui_tag_info Title: $title"
-  echo -e "$ui_tag_info GUID: $guid"
+current_processing_type=""
+while IFS=$'\x1f' read -r media_type title guid enclosure_url tmdb_id imdb_id; do
+  if [[ -z "$title" || -z "$guid" || "$enclosure_url" != http://* && "$enclosure_url" != https://* ]]; then
+    echo -e "$ui_tag_bad $(msg invalid_rss_item "$(media-name "$media_type")")"
+    continue
+  fi
+  if [[ "$media_type" != "$current_processing_type" ]]; then
+    current_processing_type="$media_type"
+    echo
+    if [[ "$media_type" == "series" ]]; then
+      section_title="$(msg processing_series)"
+    else
+      section_title="$(msg processing_movies)"
+    fi
+    printf "$ui_tag_section" "$(lon2 "$section_title")" "$section_title"
+  fi
+  if [[ "$media_type" == "series" ]]; then
+    script_db_log="$script_db_series_log"
+  else
+    script_db_log="$script_db_movies_log"
+  fi
+  echo -e "$ui_tag_info $(msg title "$title")"
+  echo -e "$ui_tag_info $(msg guid "$guid")"
   torrent_file="$script_folder/torrents/$guid.torrent"
   torrent_processed=0
   torrent_skipped=0
   
   ########################################
   ## Check db file
-  if grep -Fxq "$guid" "$script_db_movies_log"; then
-    echo -e "$ui_tag_warning Already processed"
+  if grep -Fxq "$guid" "$script_db_log"; then
+    echo -e "$ui_tag_warning $(msg already_processed)"
     echo " ----------------------------------------------------------------------------"
     continue
   fi
@@ -980,15 +1409,15 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
   skip_list_sorted=$(echo "$skip_list" | tr '|' '\n' | tr '[:upper:]' '[:lower:]' | sort -u | xargs)
   for skip in $skip_list_sorted; do
     if [[ "$title_lower" == *"$skip"* ]]; then
-      echo -e "$ui_tag_bad Ignored torrent title: $skip"
+      echo -e "$ui_tag_bad $(msg ignored_title "$skip")"
       torrent_skipped=1
       break
     fi
   done
   if (( torrent_skipped )); then
-    if ! grep -Fxq "$guid" "$script_db_movies_log"; then
-      printf '%s\n' "$guid" >> "$script_db_movies_log"
-      echo -e "$ui_tag_processed Added to database"
+    if ! grep -Fxq "$guid" "$script_db_log"; then
+      printf '%s\n' "$guid" >> "$script_db_log"
+      echo -e "$ui_tag_processed $(msg db_added)"
     fi
     echo " ----------------------------------------------------------------------------"
     continue
@@ -998,9 +1427,9 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
   ## Téléchargement du fichier torrent
   if [[ ! -s "$torrent_file" ]]; then
     if wget -q "$enclosure_url" -O "$torrent_file"; then
-      echo -e "$ui_tag_ok Torrent file downloaded"
+      echo -e "$ui_tag_ok $(msg torrent_downloaded)"
     else
-      echo -e "$ui_tag_bad Unable to download torrent file"
+      echo -e "$ui_tag_bad $(msg torrent_download_failed)"
       rm -f "$torrent_file"
       echo " ----------------------------------------------------------------------------"
       continue
@@ -1011,7 +1440,7 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
   ## Récupération du nom interne du torrent
   torrent_name=$(transmission-show "$torrent_file" | sed -nE 's/^[[:space:]]*Name:[[:space:]]*//p' | head -n 1)
   if [[ -z "$torrent_name" ]]; then
-    echo -e "$ui_tag_bad Unable to determine torrent name"
+    echo -e "$ui_tag_bad $(msg torrent_name_failed)"
     echo " ----------------------------------------------------------------------------"
     continue
   fi
@@ -1020,10 +1449,10 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
   ## Extraction de tous les fichiers vidéo acceptés
   mapfile -t new_files < <(transmission-show "$torrent_file" | sed -n '/FILES/,$p' | grep -Ei '\.(mkv|mp4|avi)([[:space:]]|$)' | sed 's/^[[:space:]]*//' | sed -E 's/\.(mkv|mp4|avi).*/.\1/I')
   if ((${#new_files[@]} == 0)); then
-    echo -e "$ui_tag_bad No MKV/MP4/AVI file found"
-    if ! grep -Fxq "$guid" "$script_db_movies_log"; then
-      printf '%s\n' "$guid" >> "$script_db_movies_log"
-      echo -e "$ui_tag_processed Added to database"
+    echo -e "$ui_tag_bad $(msg no_video)"
+    if ! grep -Fxq "$guid" "$script_db_log"; then
+      printf '%s\n' "$guid" >> "$script_db_log"
+      echo -e "$ui_tag_processed $(msg db_added)"
     fi
     echo " ----------------------------------------------------------------------------"
     continue
@@ -1039,10 +1468,10 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
       fi
     done
     if [[ -n "$banned_team" ]]; then
-      echo -e "$ui_tag_bad Banned release team: $banned_team"
-      if ! grep -Fxq "$guid" "$script_db_movies_log"; then
-        printf '%s\n' "$guid" >> "$script_db_movies_log"
-        echo -e "$ui_tag_processed Added to database"
+      echo -e "$ui_tag_bad $(msg banned_team "$banned_team")"
+      if ! grep -Fxq "$guid" "$script_db_log"; then
+        printf '%s\n' "$guid" >> "$script_db_log"
+        echo -e "$ui_tag_processed $(msg db_added)"
       fi
       echo " ----------------------------------------------------------------------------"
       continue
@@ -1059,15 +1488,15 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
       fi
     done
     if [[ -z "$approved_team" ]]; then
-      echo -e "$ui_tag_bad Release team ignored (approved: $approved_teams)"
-      if ! grep -Fxq "$guid" "$script_db_movies_log"; then
-        printf '%s\n' "$guid" >> "$script_db_movies_log"
-        echo -e "$ui_tag_processed Added to database"
+      echo -e "$ui_tag_bad $(msg team_not_approved "$approved_teams")"
+      if ! grep -Fxq "$guid" "$script_db_log"; then
+        printf '%s\n' "$guid" >> "$script_db_log"
+        echo -e "$ui_tag_processed $(msg db_added)"
       fi
       echo " ----------------------------------------------------------------------------"
       continue
     fi
-    echo -e "$ui_tag_ok Approved release team: $approved_team"
+    echo -e "$ui_tag_ok $(msg approved_team "$approved_team")"
   fi
   
   ########################################
@@ -1080,7 +1509,11 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
   accepted_imdb_ids=()
   accepted_tmdb_ids=()
   accepted_tmdb_urls=()
+  accepted_tvdb_ids=()
+  accepted_tvdb_urls=()
   accepted_poster_urls=()
+  accepted_media_types=()
+  accepted_episode_keys=()
   for my_file_raw in "${new_files[@]}"; do
     my_file=$(basename "$my_file_raw")
     my_file_lower=${my_file,,}
@@ -1088,7 +1521,7 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
     if [[ "$my_file_codec" == "Unknown" ]]; then
       my_file_codec=$(detect-codec-from-name "$title_lower")
     fi
-    echo -e "$ui_tag_ok File: $my_file"
+    echo -e "$ui_tag_ok $(msg file "$my_file")"
     
     ########################################
     ## Analyse FileBot
@@ -1100,63 +1533,95 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
     fi
     temp_file="$temp_dir/$filebot_input_name"
     touch "$temp_file"
-    filebot_name_full=$(filebot --action test -script fn:amc -non-strict --conflict override --lang fr --encoding UTF-8 -rename "$temp_file" --def minFileSize=0 minLengthMS=0 --def 'seriesFormat=/SERIES/{n.replace("?", "").replace(":", "").replace("  ", " ")} - {s}x{e} - {t.replace("?", "").replace(":", "").replace("  ", " ")}' --def 'movieFormat=/MOVIE/{n.replace("?", "").replace(":", "").replace("  ", " ")} ({y})' --output "$temp_dir" 2>/dev/null | grep '\[TEST\]' | sed -n 's/^.* to \[\(.*\)\]$/\1/p' | head -n 1)
+    filebot_name_full=$(filebot --action test -script fn:amc -non-strict --conflict override --lang fr --encoding UTF-8 -rename "$temp_file" --def minFileSize=0 minLengthMS=0 --def 'seriesFormat=/SERIES/{n.replace("?", "").replace(":", "").replace("  ", " ")}/{n.replace("?", "").replace(":", "").replace("  ", " ")} - {sxe} - {t.replace("?", "").replace(":", "").replace("  ", " ")}' --def 'movieFormat=/MOVIE/{n.replace("?", "").replace(":", "").replace("  ", " ")} ({y})' --output "$temp_dir" 2>/dev/null | grep '\[TEST\]' | sed -n 's/^.* to \[\(.*\)\]$/\1/p' | head -n 1)
 
     filebot_retry_reason=""
     if [[ -z "$filebot_name_full" ]]; then
       filebot_retry_reason="name not found"
-    elif [[ "$filebot_name_full" == */SERIES/* ]]; then
+    elif [[ "$media_type" == "movie" && "$filebot_name_full" == */SERIES/* ]]; then
       filebot_retry_reason="incorrect TV series detection"
+    elif [[ "$media_type" == "series" && "$filebot_name_full" == */MOVIE/* ]]; then
+      filebot_retry_reason="incorrect movie detection"
     fi
 
-    if [[ "$tmdb_id" =~ ^[0-9]+$ ]]; then
+    if [[ "$media_type" == "movie" && "$tmdb_id" =~ ^[0-9]+$ ]]; then
       if ((${#new_files[@]} == 1)); then
-        echo -e "$ui_tag_info Identifying movie with RSS TMDb ID: $tmdb_id"
+        echo -e "$ui_tag_info $(msg identify_movie "$tmdb_id")"
         forced_filebot_name_full=$(filebot -rename "$temp_file" --q "$tmdb_id" --db TheMovieDB --lang fr --encoding UTF-8 --action test --format '/MOVIE/{n.replace("?", "").replace(":", "").replace("  ", " ")} ({y})' --output "$temp_dir" 2>/dev/null | sed -n 's/^.* to \[\(.*\)\]$/\1/p' | head -n 1)
         if [[ "$forced_filebot_name_full" == */MOVIE/* ]]; then
           filebot_name_full="$forced_filebot_name_full"
-          echo -e "$ui_tag_ok FileBot name found with TMDb ID: $(basename "$filebot_name_full")"
+          echo -e "$ui_tag_ok $(msg filebot_movie_found "$(basename "$filebot_name_full")")"
         else
           filebot_name_full=""
-          echo -e "$ui_tag_bad FileBot TMDb movie identification failed: $tmdb_id"
+          echo -e "$ui_tag_bad $(msg filebot_movie_failed "$tmdb_id")"
         fi
       elif [[ -n "$filebot_retry_reason" ]]; then
-        echo -e "$ui_tag_warning TMDb ID fallback skipped: torrent contains multiple video files"
+        echo -e "$ui_tag_warning $(msg tmdb_multifile_skip)"
+      fi
+    elif [[ "$media_type" == "series" && "$tmdb_id" =~ ^[0-9]+$ ]]; then
+      echo -e "$ui_tag_info $(msg identify_series "$tmdb_id")"
+      forced_filebot_name_full=$(filebot -rename "$temp_file" --q "$tmdb_id" --db TheMovieDB::TV --lang fr --encoding UTF-8 --action test --format '/SERIES/{n.replace("?", "").replace(":", "").replace("  ", " ")}/{n.replace("?", "").replace(":", "").replace("  ", " ")} - {sxe} - {t.replace("?", "").replace(":", "").replace("  ", " ")}' --output "$temp_dir" 2>/dev/null | sed -n 's/^.* to \[\(.*\)\]$/\1/p' | head -n 1)
+      if [[ "$forced_filebot_name_full" == */SERIES/*/* ]]; then
+        filebot_name_full="$forced_filebot_name_full"
+        echo -e "$ui_tag_ok $(msg filebot_series_found "$(basename "$filebot_name_full")")"
+      else
+        echo -e "$ui_tag_warning $(msg filebot_series_failed "$tmdb_id")"
       fi
     fi
     rm -rf "$temp_dir"
 
     if [[ -z "$filebot_name_full" ]]; then
       torrent_skipped=1
-      echo -e "$ui_tag_bad FileBot issue: no name found"
+      echo -e "$ui_tag_bad $(msg filebot_no_name)"
       continue
     fi
     
     ########################################
-    ## Series detection
-    if [[ "$filebot_name_full" == */SERIES/* ]]; then
-      echo -e "$ui_tag_bad TV Series detected: $my_file"
-      torrent_skipped=1
-      continue
-    fi
-    if [[ "$filebot_name_full" != */MOVIE/* ]]; then
-      echo -e "$ui_tag_bad Unknown FileBot media type"
-      continue
+    ## Media type and series watchlist
+    if [[ "$media_type" == "series" ]]; then
+      if [[ "$filebot_name_full" != */SERIES/*/* ]]; then
+        echo -e "$ui_tag_bad $(msg filebot_not_series "$my_file")"
+        torrent_skipped=1
+        continue
+      fi
+      series_name=$(basename "$(dirname "$filebot_name_full")")
+      series_key=$(normalize-series-name "$series_name")
+      tracked_series_name=""
+      if [[ "$tmdb_id" =~ ^[0-9]+$ && -n "${series_tmdb_watchlist[$tmdb_id]:-}" ]]; then
+        tracked_series_name=${series_tmdb_watchlist[$tmdb_id]}
+      elif [[ "$imdb_id" =~ ^tt[0-9]+$ && -n "${series_imdb_watchlist[$imdb_id]:-}" ]]; then
+        tracked_series_name=${series_imdb_watchlist[$imdb_id]}
+      elif [[ -n "$series_key" && -z "${series_title_ambiguous[$series_key]:-}" ]]; then
+        tracked_series_name=${series_watchlist[$series_key]:-}
+      fi
+      if [[ -z "$tracked_series_name" ]]; then
+        echo -e "$ui_tag_processed $(msg series_not_tracked "$series_name")"
+        torrent_skipped=1
+        continue
+      fi
+      echo -e "$ui_tag_ok $(msg series_tracked "$tracked_series_name")"
+    else
+      if [[ "$filebot_name_full" != */MOVIE/* ]]; then
+        echo -e "$ui_tag_bad $(msg filebot_unknown_type)"
+        torrent_skipped=1
+        continue
+      fi
+      series_name=""
     fi
     filebot_name=$(basename "$filebot_name_full")
-    echo -e "$ui_tag_ok FileBot name: $filebot_name"
+    echo -e "$ui_tag_ok $(msg filebot_name "$filebot_name")"
     
     ########################################
     ## Filtres
     if [[ ! "$my_file_lower $title_lower" =~ $resolution_pattern ]]; then
-      echo -e "$ui_tag_bad Resolution ignored: $resolution_preference required"
+      echo -e "$ui_tag_bad $(msg resolution_ignored "$resolution_preference")"
       torrent_skipped=1
       continue
     fi
     skip_list_sorted=$(echo "$skip_list" | tr '|' '\n' | tr '[:upper:]' '[:lower:]' | sort -u | xargs)
     for skip in $skip_list_sorted; do
       if [[ "$my_file_lower" == *"$skip"* ]]; then
-        echo -e "$ui_tag_bad Ignored release: $skip"
+        echo -e "$ui_tag_bad $(msg release_ignored "$skip")"
         torrent_skipped=1
         continue 2
       fi
@@ -1164,35 +1629,67 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
 
     ########################################
     ## FileBot metadata and optional IMDb rating filter
-    movie_name="${filebot_name%.*}"
-    get-movie-metadata "$movie_name" "$tmdb_id"
-    if [[ -n "$imdb_minimum" ]]; then
+    if [[ "$media_type" == "series" ]]; then
+      movie_name="$series_name"
+      movie_synopsis="$(msg series_episode)"
+      movie_imdb_rating="$(msg unavailable)"
+      movie_imdb_id="$imdb_id"
+      [[ "$movie_imdb_id" =~ ^tt[0-9]+$ ]] || movie_imdb_id="$(msg unavailable)"
+      movie_tmdb_id="$tmdb_id"
+      if [[ "$movie_tmdb_id" =~ ^[0-9]+$ ]]; then
+        movie_tmdb_url="https://www.themoviedb.org/tv/$movie_tmdb_id?language=fr-FR"
+      else
+        movie_tmdb_id="$(msg unavailable)"
+        movie_tmdb_url=""
+      fi
+      if [[ "$tmdb_id" =~ ^[0-9]+$ ]]; then
+        get-series-metadata "$tmdb_id"
+      else
+        get-series-metadata "$series_name"
+      fi
+      if [[ "$filebot_name" =~ [[:space:]]-[[:space:]]([0-9]+[xX][0-9]+([-+][0-9]+)*)[[:space:]]-[[:space:]] ]]; then
+        episode_key=${BASH_REMATCH[1],,}
+      else
+        episode_key=$(printf '%s' "${series_name,,}|${filebot_name,,}" | md5sum | cut -d' ' -f1)
+      fi
+    else
+      movie_name="${filebot_name%.*}"
+      episode_key=""
+      series_tvdb_id=""
+      series_tvdb_url=""
+      get-movie-metadata "$movie_name" "$tmdb_id"
+    fi
+    if [[ "$media_type" == "movie" && -n "$imdb_minimum" ]]; then
       if [[ ! "$movie_imdb_rating" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-        echo -e "$ui_tag_bad IMDb rating unavailable (minimum required: $imdb_minimum)"
+        echo -e "$ui_tag_bad $(msg imdb_unavailable "$imdb_minimum")"
         torrent_skipped=1
         continue
       elif ! imdb-rating-meets-minimum "$movie_imdb_rating" "$imdb_minimum"; then
-        echo -e "$ui_tag_bad IMDb rating ignored: $movie_imdb_rating < $imdb_minimum"
+        echo -e "$ui_tag_bad $(msg imdb_ignored "$movie_imdb_rating" "$imdb_minimum")"
         torrent_skipped=1
         continue
       else
-        echo -e "$ui_tag_ok IMDb rating accepted: $movie_imdb_rating >= $imdb_minimum"
+        echo -e "$ui_tag_ok $(msg imdb_accepted "$movie_imdb_rating" "$imdb_minimum")"
       fi
-    else
-      echo -e "$ui_tag_info IMDb rating: $movie_imdb_rating"
+    elif [[ "$media_type" == "movie" ]]; then
+      echo -e "$ui_tag_info $(msg imdb_rating "$movie_imdb_rating")"
     fi
     
     ########################################
     ## Checking for the presence of a local file
+    local_search_name="$filebot_name"
+    if [[ "$media_type" == "series" ]]; then
+      local_search_name="$series_name - $episode_key"
+    fi
     if [[ -n "${plex_sort_folder:-}" ]]; then
       mapfile -t locate_databases < <(find "$plex_sort_folder" -maxdepth 1 -type f -name "*.locate.db" | sort)
       local_check=""
       for locate_db in "${locate_databases[@]}"; do
-        local_check+=$'\n'"$(locate -i -d "$locate_db" -- "$filebot_name" || true)"
+        local_check+=$'\n'"$(locate -i -d "$locate_db" -- "$local_search_name" || true)"
       done
       local_check=$(printf '%s\n' "$local_check" | sed '/^$/d')
     else
-      local_check=$(locate -i -- "$filebot_name" | grep -viE '/mnt/Plex/|/\.Trash/' || true)
+      local_check=$(locate -i -- "$local_search_name" | grep -viE '/mnt/Plex/|/\.Trash/' || true)
     fi
     if [[ -n "$local_check" ]]; then
       local_check_file=$(printf '%s\n' "$local_check" | head -n 1)
@@ -1201,35 +1698,35 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
       local_check_standard_resolution=$(resolution-standard "$local_check_width" "$local_check_height")
       local_check_codec_raw=$(mediainfo --Inform="Video;%Format%" "$local_check_file")
       local_check_codec=$(codec-standard "$local_check_codec_raw")
-      echo -e "$ui_tag_processed Movie found: $local_check_file"
-      echo -e "$ui_tag_processed Movie resolution: $local_check_standard_resolution"
-      echo -e "$ui_tag_processed Movie codec: $local_check_codec"
+      echo -e "$ui_tag_processed $(msg local_found "$(media-name "$media_type")" "$local_check_file")"
+      echo -e "$ui_tag_processed $(msg local_resolution "$local_check_standard_resolution")"
+      echo -e "$ui_tag_processed $(msg local_codec "$local_check_codec")"
 
       local_resolution_rank=$(resolution-rank "$local_check_standard_resolution")
       target_resolution_rank=$(resolution-rank "$resolution_target_standard")
       if (( local_resolution_rank >= 0 && local_resolution_rank < target_resolution_rank )); then
-        echo -e "$ui_tag_ok Resolution upgrade: $local_check_standard_resolution -> $resolution_target_standard"
+        echo -e "$ui_tag_ok $(msg resolution_upgrade "$local_check_standard_resolution" "$resolution_target_standard")"
       elif (( local_resolution_rank > target_resolution_rank )); then
-        echo -e "$ui_tag_processed Resolution downgrade ignored: $local_check_standard_resolution -> $resolution_target_standard"
+        echo -e "$ui_tag_processed $(msg resolution_downgrade "$local_check_standard_resolution" "$resolution_target_standard")"
         torrent_skipped=1
         continue
       elif [[ "$my_file_codec" == "$local_check_codec" ]]; then
-        echo -e "$ui_tag_processed Local version already uses the same codec: $local_check_codec"
+        echo -e "$ui_tag_processed $(msg same_codec "$local_check_codec")"
         torrent_skipped=1
         continue
       elif [[ -n "${codec_preference:-}" && "$my_file_codec" == "$codec_preference" ]]; then
-        echo -e "$ui_tag_ok Codec replacement: $local_check_codec -> $my_file_codec (preferred: $codec_preference)"
+        echo -e "$ui_tag_ok $(msg codec_replacement_preferred "$local_check_codec" "$my_file_codec" "$codec_preference")"
       elif [[ -n "${codec_preference:-}" ]]; then
-        echo -e "$ui_tag_processed Codec ignored: $my_file_codec (preferred: $codec_preference)"
+        echo -e "$ui_tag_processed $(msg codec_ignored "$my_file_codec" "$codec_preference")"
         torrent_skipped=1
         continue
       else
-        echo -e "$ui_tag_ok Codec replacement: $local_check_codec -> $my_file_codec"
+        echo -e "$ui_tag_ok $(msg codec_replacement "$local_check_codec" "$my_file_codec")"
       fi
     else
-      echo -e "$ui_tag_ok No local movie found: codec preference not applied ($my_file_codec)"
+      echo -e "$ui_tag_ok $(msg no_local "$(media-name "$media_type")" "$my_file_codec")"
     fi
-    echo -e "$ui_tag_ok New movie detected"
+    echo -e "$ui_tag_ok $(msg new_media "$(media-name "$media_type")")"
     
     accepted_files+=("$my_file_raw")
     accepted_codecs+=("$my_file_codec")
@@ -1239,17 +1736,21 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
     accepted_imdb_ids+=("$movie_imdb_id")
     accepted_tmdb_ids+=("$movie_tmdb_id")
     accepted_tmdb_urls+=("$movie_tmdb_url")
+    accepted_tvdb_ids+=("$series_tvdb_id")
+    accepted_tvdb_urls+=("$series_tvdb_url")
     accepted_poster_urls+=("$movie_poster_url")
+    accepted_media_types+=("$media_type")
+    accepted_episode_keys+=("$episode_key")
   done
   
   ########################################
   ## Aucun fichier accepté
   if ((${#accepted_files[@]} == 0)); then
-    echo -e "$ui_tag_bad No accepted MKV/MP4/AVI file"
+    echo -e "$ui_tag_bad $(msg no_accepted_video)"
     if (( torrent_skipped )); then
-      if ! grep -Fxq "$guid" "$script_db_movies_log"; then
-        printf '%s\n' "$guid" >> "$script_db_movies_log"
-        echo -e "$ui_tag_processed Added to database"
+      if ! grep -Fxq "$guid" "$script_db_log"; then
+        printf '%s\n' "$guid" >> "$script_db_log"
+        echo -e "$ui_tag_processed $(msg db_added)"
       fi
     fi
     echo " ----------------------------------------------------------------------------"
@@ -1263,15 +1764,23 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
   ## Recherche d’un torrent déjà présent
   torrent_id=$(transmission-remote "$transmission_host" -n "$transmission_auth" -l | grep -F -- "$torrent_name" | head -n 1 | awk '{print $1}')
   if [[ -n "$torrent_id" ]]; then
-    echo -e "$ui_tag_warning Torrent already present in Transmission (ID: $torrent_id)"
+    echo -e "$ui_tag_warning $(msg torrent_present "$torrent_id")"
     # Aucun fichier n’est désactivé ou réactivé sur un torrent existant.
     torrent_processed=1
   else
     ########################################
     ## Destination
+    torrent_media_type=${accepted_media_types[0]}
     torrent_codec="Unknown"
     for accepted_codec in "${accepted_codecs[@]}"; do
-      if [[ "$accepted_codec" == "H265" ]]; then
+      if [[ "$torrent_media_type" == "series" ]]; then
+        if [[ "$torrent_codec" == "Unknown" ]]; then
+          torrent_codec="$accepted_codec"
+        elif [[ "$accepted_codec" != "$torrent_codec" ]]; then
+          torrent_codec="Mixed"
+          break
+        fi
+      elif [[ "$accepted_codec" == "H265" ]]; then
         torrent_codec="H265"
         break
       elif [[ "$torrent_codec" == "Unknown" ]]; then
@@ -1279,29 +1788,53 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
       fi
     done
 
-    if [[ "$torrent_codec" == "H265" && -n "${filebot_films_H265:-}" && -d "$filebot_films_H265" ]]; then
+    if [[ "$torrent_media_type" == "series" ]]; then
+      if [[ "$torrent_codec" == "H265" && -n "${filebot_series_H265:-}" && -d "$filebot_series_H265" ]]; then
+        transmission_folder="$filebot_series_H265"
+      else
+        transmission_folder="$filebot_series"
+      fi
+    elif [[ "$torrent_codec" == "H265" && -n "${filebot_films_H265:-}" && -d "$filebot_films_H265" ]]; then
       transmission_folder="$filebot_films_H265"
     elif [[ "$torrent_codec" == "AV1" && -n "${filebot_films_AV1:-}" && -d "$filebot_films_AV1" ]]; then
       transmission_folder="$filebot_films_AV1"
     else
       transmission_folder="$filebot_films"
     fi
-    echo -e "$ui_tag_info Torrent codec: $torrent_codec"
-    echo -e "$ui_tag_info Destination: $transmission_folder"
+    echo -e "$ui_tag_info $(msg torrent_codec "$torrent_codec")"
+    echo -e "$ui_tag_info $(msg destination "$transmission_folder")"
 
     ########################################
     ## Resolve movie identities and codec duplicates already in Transmission
     torrent_movie_labels=()
+    accepted_identity_labels=()
     for accepted_index in "${!accepted_files[@]}"; do
       movie_identity_found=0
-      if [[ "${accepted_tmdb_ids[$accepted_index]}" =~ ^[0-9]+$ ]]; then
+      if [[ "${accepted_media_types[$accepted_index]}" == "series" ]]; then
+        episode_key=${accepted_episode_keys[$accepted_index]}
+        if [[ "${accepted_tmdb_ids[$accepted_index]}" =~ ^[0-9]+$ ]]; then
+          movie_label="c411-series-tmdb-${accepted_tmdb_ids[$accepted_index]}-$episode_key"
+          movie_identity_found=1
+        elif [[ "${accepted_imdb_ids[$accepted_index]}" =~ ^tt[0-9]+$ ]]; then
+          movie_label="c411-series-imdb-${accepted_imdb_ids[$accepted_index]}-$episode_key"
+          movie_identity_found=1
+        else
+          series_key=$(printf '%s' "${accepted_movie_names[$accepted_index],,}|$episode_key" | md5sum | cut -d' ' -f1)
+          movie_label="c411-series-$series_key"
+          movie_identity_found=1
+        fi
+        if [[ ! " ${torrent_movie_labels[*]} " == *" $movie_label "* ]]; then
+          torrent_movie_labels+=("$movie_label")
+        fi
+        accepted_identity_labels[$accepted_index]="$movie_label"
+      elif [[ "${accepted_tmdb_ids[$accepted_index]}" =~ ^[0-9]+$ ]]; then
         movie_label="c411-tmdb-${accepted_tmdb_ids[$accepted_index]}"
         if [[ ! " ${torrent_movie_labels[*]} " == *" $movie_label "* ]]; then
           torrent_movie_labels+=("$movie_label")
         fi
         movie_identity_found=1
       fi
-      if [[ "${accepted_imdb_ids[$accepted_index]}" =~ ^tt[0-9]+$ ]]; then
+      if [[ "${accepted_media_types[$accepted_index]}" != "series" && "${accepted_imdb_ids[$accepted_index]}" =~ ^tt[0-9]+$ ]]; then
         movie_label="c411-imdb-${accepted_imdb_ids[$accepted_index]}"
         if [[ ! " ${torrent_movie_labels[*]} " == *" $movie_label "* ]]; then
           torrent_movie_labels+=("$movie_label")
@@ -1323,21 +1856,28 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
     duplicate_completed_to_stop=()
     transmission_torrents=$(transmission-remote "$transmission_host" -n "$transmission_auth" -j -t all -i 2>/dev/null)
     if ! jq -e '.result == "success" and (.arguments.torrents | type == "array")' >/dev/null 2>&1 <<< "$transmission_torrents"; then
-      echo -e "$ui_tag_bad Unable to inspect Transmission torrents for duplicates"
+      echo -e "$ui_tag_bad $(msg transmission_inspect_failed)"
       echo " ----------------------------------------------------------------------------"
       continue
     fi
-    for movie_label in "${torrent_movie_labels[@]}"; do
-      while IFS=$'\t' read -r existing_id existing_hash existing_name existing_codec existing_completed; do
+    if [[ "$torrent_media_type" == "series" && ${#accepted_files[@]} -gt 1 ]]; then
+      echo -e "$ui_tag_info $(msg multifile_duplicate_skip)"
+    else
+      for movie_label in "${torrent_movie_labels[@]}"; do
+        while IFS=$'\t' read -r existing_id existing_hash existing_name existing_codec existing_completed existing_series_label_count; do
         [[ -n "$existing_id" ]] || continue
-        if [[ -n "$codec_preference" && "$torrent_codec" == "$codec_preference" && "$existing_codec" != "$codec_preference" ]]; then
+        if [[ "$torrent_media_type" == "series" && "$existing_series_label_count" -gt 1 ]]; then
+          echo -e "$ui_tag_processed $(msg episode_multifile "$existing_name")"
+          skip_codec_duplicate=1
+          break 2
+        elif [[ -n "$codec_preference" && "$torrent_codec" == "$codec_preference" && "$existing_codec" != "$codec_preference" ]]; then
           if [[ ! " ${duplicate_hashes_to_stop[*]} " == *" $existing_hash "* ]]; then
             duplicate_hashes_to_stop+=("$existing_hash")
             duplicate_names_to_stop+=("$existing_name")
             duplicate_completed_to_stop+=("$existing_completed")
           fi
         else
-          echo -e "$ui_tag_processed Codec duplicate ignored: $torrent_codec; existing: $existing_name ($existing_codec)"
+          echo -e "$ui_tag_processed $(msg codec_duplicate "$torrent_codec" "$existing_name" "$existing_codec")"
           skip_codec_duplicate=1
           break 2
         fi
@@ -1350,15 +1890,17 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
             .hashString,
             .name,
             (((.labels // []) | map(select(startswith("c411-codec-"))) | first // "Unknown") | sub("^c411-codec-"; "")),
-            (if ((.sizeWhenDone // 0) > 0 and (.leftUntilDone // -1) == 0) then "yes" else "no" end)
+            (if ((.sizeWhenDone // 0) > 0 and (.leftUntilDone // -1) == 0) then "yes" else "no" end),
+            ((.labels // []) | map(select(startswith("c411-series-"))) | length)
           ] | @tsv
         ' <<< "$transmission_torrents"
-      )
-    done
+        )
+      done
+    fi
     if (( skip_codec_duplicate )); then
-      if ! grep -Fxq "$guid" "$script_db_movies_log"; then
-        printf '%s\n' "$guid" >> "$script_db_movies_log"
-        echo -e "$ui_tag_processed Added to database"
+      if ! grep -Fxq "$guid" "$script_db_log"; then
+        printf '%s\n' "$guid" >> "$script_db_log"
+        echo -e "$ui_tag_processed $(msg db_added)"
       fi
       echo " ----------------------------------------------------------------------------"
       continue
@@ -1367,30 +1909,32 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
     ########################################
     ## Ajout en pause
     if ! transmission-remote "$transmission_host" -n "$transmission_auth" -a "$torrent_file" -w "$transmission_folder" -S >/dev/null 2>&1; then
-      echo -e "$ui_tag_bad Unable to add torrent"
+      echo -e "$ui_tag_bad $(msg torrent_add_failed)"
       echo " ----------------------------------------------------------------------------"
       continue
     fi
-    echo -e "$ui_tag_ok Torrent added paused"
+    echo -e "$ui_tag_ok $(msg torrent_added)"
     sleep 1
     
     ########################################
     ## Récupération de l’ID numérique
     torrent_id=$(transmission-remote "$transmission_host" -n "$transmission_auth" -l | grep -F -- "$torrent_name" | head -n 1 | awk '{print $1}')
     if [[ -z "$torrent_id" ]]; then
-      echo -e "$ui_tag_bad Unable to retrieve torrent ID"
+      echo -e "$ui_tag_bad $(msg torrent_id_failed)"
       echo " ----------------------------------------------------------------------------"
       continue
     fi
     #echo -e "$ui_tag_ok Torrent ID: $torrent_id"
 
-    torrent_labels=("c411" "c411-codec-$torrent_codec" "${torrent_movie_labels[@]}")
-    torrent_label_list=$(IFS=,; echo "${torrent_labels[*]}")
-    if ! transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" -L "$torrent_label_list" >/dev/null 2>&1; then
-      echo -e "$ui_tag_bad Unable to label torrent for duplicate management"
-      transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" -r >/dev/null 2>&1
-      echo " ----------------------------------------------------------------------------"
-      continue
+    if [[ "$torrent_media_type" != "series" ]]; then
+      torrent_labels=("c411" "c411-codec-$torrent_codec" "${torrent_movie_labels[@]}")
+      torrent_label_list=$(IFS=,; echo "${torrent_labels[*]}")
+      if ! transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" -L "$torrent_label_list" >/dev/null 2>&1; then
+        echo -e "$ui_tag_bad $(msg label_failed)"
+        transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" -r >/dev/null 2>&1
+        echo " ----------------------------------------------------------------------------"
+        continue
+      fi
     fi
     
     ########################################
@@ -1404,7 +1948,11 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
     enabled_imdb_ids=()
     enabled_tmdb_ids=()
     enabled_tmdb_urls=()
+    enabled_tvdb_ids=()
+    enabled_tvdb_urls=()
     enabled_poster_urls=()
+    enabled_media_types=()
+    enabled_identity_labels=()
     for accepted_index in "${!accepted_files[@]}"; do
       accepted_file="${accepted_files[$accepted_index]}"
       accepted_name=$(basename "$accepted_file")
@@ -1424,7 +1972,13 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
         enabled_imdb_ids+=("${accepted_imdb_ids[$accepted_index]}")
         enabled_tmdb_ids+=("${accepted_tmdb_ids[$accepted_index]}")
         enabled_tmdb_urls+=("${accepted_tmdb_urls[$accepted_index]}")
+        enabled_tvdb_ids+=("${accepted_tvdb_ids[$accepted_index]}")
+        enabled_tvdb_urls+=("${accepted_tvdb_urls[$accepted_index]}")
         enabled_poster_urls+=("${accepted_poster_urls[$accepted_index]}")
+        enabled_media_types+=("${accepted_media_types[$accepted_index]}")
+        if [[ -n "${accepted_identity_labels[$accepted_index]:-}" ]]; then
+          enabled_identity_labels+=("${accepted_identity_labels[$accepted_index]}")
+        fi
 #      else
 #        echo -e "$ui_tag_bad File index not found: $accepted_name"
       fi
@@ -1433,16 +1987,27 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
     ########################################
     ## No accepted file index found : Transmission file deleted 
     if ((${#accepted_file_ids[@]} == 0)); then
-      echo -e "$ui_tag_bad No accepted file index found"
+      echo -e "$ui_tag_bad $(msg file_index_failed)"
       transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" -r >/dev/null 2>&1
       echo " ----------------------------------------------------------------------------"
       continue
+    fi
+
+    if [[ "$torrent_media_type" == "series" ]]; then
+      torrent_labels=("c411" "c411-codec-$torrent_codec" "${enabled_identity_labels[@]}")
+      torrent_label_list=$(IFS=,; echo "${torrent_labels[*]}")
+      if ! transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" -L "$torrent_label_list" >/dev/null 2>&1; then
+        echo -e "$ui_tag_bad $(msg series_label_failed)"
+        transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" -r >/dev/null 2>&1
+        echo " ----------------------------------------------------------------------------"
+        continue
+      fi
     fi
     
     ########################################
     ## Keep accepted files enabled and disable only unnecessary files
     file_ids=$(IFS=,; echo "${accepted_file_ids[*]}")
-    echo -e "$ui_tag_info Enabled file indexes: $file_ids"
+    echo -e "$ui_tag_info $(msg enabled_indexes "$file_ids")"
 
     mapfile -t all_file_ids < <(printf '%s\n' "$transmission_files" | awk '/^[[:space:]]*[0-9]+:/ { id=$1; sub(/:$/, "", id); print id }')
     disabled_file_ids=()
@@ -1462,9 +2027,9 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
     if ((${#disabled_file_ids[@]})); then
       disabled_ids=$(IFS=,; echo "${disabled_file_ids[*]}")
       if transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" -G "$disabled_ids" >/dev/null 2>&1; then
-        echo -e "$ui_tag_ok Disabled unnecessary file indexes: $disabled_ids"
+        echo -e "$ui_tag_ok $(msg disabled_indexes "$disabled_ids")"
       else
-        echo -e "$ui_tag_bad Unable to disable unnecessary file indexes: $disabled_ids"
+        echo -e "$ui_tag_bad $(msg disable_indexes_failed "$disabled_ids")"
         transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" -r >/dev/null 2>&1
         echo " ----------------------------------------------------------------------------"
         continue
@@ -1474,19 +2039,19 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
     duplicate_stop_failed=0
     for duplicate_index in "${!duplicate_hashes_to_stop[@]}"; do
       if transmission-remote "$transmission_host" -n "$transmission_auth" -t "${duplicate_hashes_to_stop[$duplicate_index]}" -S >/dev/null 2>&1; then
-        echo -e "$ui_tag_warning Non-preferred duplicate stopped: ${duplicate_names_to_stop[$duplicate_index]}"
+        echo -e "$ui_tag_warning $(msg duplicate_stopped "${duplicate_names_to_stop[$duplicate_index]}")"
         if [[ "${duplicate_completed_to_stop[$duplicate_index]}" == "yes" ]]; then
-          echo -e "$ui_tag_processed Torrent already completed; stopped push skipped"
+          echo -e "$ui_tag_processed $(msg completed_push_skip)"
         elif [[ -n "${push_token_app:-}" && -n "${push_target:-}" ]]; then
           push_content=$(render-stopped-push-notification "${duplicate_names_to_stop[$duplicate_index]}")
-          if push-message "Torrent stoppé dans Transmission" "$push_content" "-1"; then
-            echo -e "$ui_tag_ok Push sent for stopped torrent: ${duplicate_names_to_stop[$duplicate_index]}"
+          if push-message "$(msg stopped_push_title)" "$push_content" "-1"; then
+            echo -e "$ui_tag_ok $(msg stopped_push_sent "${duplicate_names_to_stop[$duplicate_index]}")"
           else
-            echo -e "$ui_tag_bad Unable to send stopped torrent push: ${duplicate_names_to_stop[$duplicate_index]}"
+            echo -e "$ui_tag_bad $(msg stopped_push_failed "${duplicate_names_to_stop[$duplicate_index]}")"
           fi
         fi
       else
-        echo -e "$ui_tag_bad Unable to stop non-preferred duplicate: ${duplicate_names_to_stop[$duplicate_index]}"
+        echo -e "$ui_tag_bad $(msg duplicate_stop_failed "${duplicate_names_to_stop[$duplicate_index]}")"
         duplicate_stop_failed=1
       fi
     done
@@ -1499,19 +2064,19 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
     ########################################
     ## Starting torrent
     if [[ "$transmission_torrent_paused" == "yes" ]]; then
-      echo -e "$ui_tag_warning Download in pause"
-      transmission_state="En pause"
+      echo -e "$ui_tag_warning $(msg download_paused)"
+      transmission_state="$(msg state_paused)"
       torrent_processed=1
     else
      if transmission-remote "$transmission_host" -n "$transmission_auth" -t "$torrent_id" -s >/dev/null 2>&1; then
-        echo -e "$ui_tag_ok Download started"
+        echo -e "$ui_tag_ok $(msg download_started)"
         for enabled_file in "${enabled_files[@]}"; do
-          echo -e "$ui_tag_ok Enabled: $(basename "$enabled_file")"
+          echo -e "$ui_tag_ok $(msg enabled "$(basename "$enabled_file")")"
         done
-        transmission_state="Téléchargement démarré"
+        transmission_state="$(msg state_started)"
         torrent_processed=1
       else
-        echo -e "$ui_tag_bad Unable to start torrent"
+        echo -e "$ui_tag_bad $(msg torrent_start_failed)"
       fi
     fi
 
@@ -1525,25 +2090,36 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
         movie_imdb_id="${enabled_imdb_ids[$enabled_index]}"
         movie_tmdb_id="${enabled_tmdb_ids[$enabled_index]}"
         movie_tmdb_url="${enabled_tmdb_urls[$enabled_index]}"
+        series_tvdb_id="${enabled_tvdb_ids[$enabled_index]}"
+        series_tvdb_url="${enabled_tvdb_urls[$enabled_index]}"
         movie_poster_url="${enabled_poster_urls[$enabled_index]}"
-        push_content=$(render-push-notification)
+        enabled_media_type="${enabled_media_types[$enabled_index]}"
+        if [[ "$enabled_media_type" == "series" ]]; then
+          push_content=$(render-push-notification "$push_notification_serie_added")
+          push_url="$series_tvdb_url"
+          push_url_title="$(msg view_tvdb)"
+        else
+          push_content=$(render-push-notification "$push_notification_movie_added")
+          push_url="$movie_tmdb_url"
+          push_url_title="$(msg view_tmdb)"
+        fi
         poster_file=""
         if [[ -n "$movie_poster_url" ]]; then
           poster_file=$(mktemp "$script_tmp_folder/c411-poster.XXXXXX")
           if ! curl --silent --show-error --fail --location --max-time 20 --output "$poster_file" "$movie_poster_url"; then
-            echo -e "$ui_tag_warning Unable to download movie poster: $movie_name"
+            echo -e "$ui_tag_warning $(msg poster_failed "$movie_name")"
             rm -f "$poster_file"
             poster_file=""
           elif (( $(stat -c %s "$poster_file") > 5242880 )); then
-            echo -e "$ui_tag_warning Movie poster exceeds Pushover limit: $movie_name"
+            echo -e "$ui_tag_warning $(msg poster_too_large "$movie_name")"
             rm -f "$poster_file"
             poster_file=""
           fi
         fi
-        if push-message "Fichier ajouté à Transmission" "$push_content" "-1" "$movie_tmdb_url" "Voir sur The Movie Database" "$poster_file"; then
-          echo -e "$ui_tag_ok Push sent: $enabled_name"
+        if push-message "$(msg file_added_title)" "$push_content" "-1" "$push_url" "$push_url_title" "$poster_file"; then
+          echo -e "$ui_tag_ok $(msg push_sent "$enabled_name")"
         else
-          echo -e "$ui_tag_bad Unable to send push: $enabled_name"
+          echo -e "$ui_tag_bad $(msg push_failed "$enabled_name")"
         fi
         [[ -n "$poster_file" ]] && rm -f "$poster_file"
       done
@@ -1553,25 +2129,37 @@ while IFS=$'\t' read -r title guid enclosure_url tmdb_id; do
   ########################################
   ## Add GUID to db file
   if (( torrent_processed )); then
-    if ! grep -Fxq "$guid" "$script_db_movies_log"; then
-      printf '%s\n' "$guid" >> "$script_db_movies_log"
-      echo -e "$ui_tag_processed Added to database"
+    if ! grep -Fxq "$guid" "$script_db_log"; then
+      printf '%s\n' "$guid" >> "$script_db_log"
+      echo -e "$ui_tag_processed $(msg db_added)"
     fi
   fi
   echo " ----------------------------------------------------------------------------"
 done < <(
-  xmlstarlet sel \
-    -N 'torznab=http://torznab.com/schemas/2015/feed' \
-    -T \
-    -t \
-    -m '/rss/channel/item' \
-    -v 'normalize-space(title)' \
-    -o $'\t' \
-    -v 'normalize-space(guid)' \
-    -o $'\t' \
-    -v 'enclosure/@url' \
-    -o $'\t' \
-    -v 'torznab:attr[@name="tmdbid"]/@value' \
-    -n \
-    "$rss_file"
+  for rss_media_type in movie series; do
+    if [[ "$rss_media_type" == "series" ]]; then
+      (( series_enabled )) || continue
+      current_rss_file="$rss_series_file"
+    else
+      current_rss_file="$rss_movies_file"
+    fi
+    xmlstarlet sel \
+      -N 'torznab=http://torznab.com/schemas/2015/feed' \
+      -T \
+      -t \
+      -m '/rss/channel/item' \
+      -o "$rss_media_type" \
+      -o $'\x1f' \
+      -v 'normalize-space(title)' \
+      -o $'\x1f' \
+      -v 'normalize-space(guid)' \
+      -o $'\x1f' \
+      -v 'enclosure/@url' \
+      -o $'\x1f' \
+      -v 'torznab:attr[@name="tmdbid"]/@value' \
+      -o $'\x1f' \
+      -v 'torznab:attr[@name="imdbid"]/@value' \
+      -n \
+      "$current_rss_file"
+  done
 )
