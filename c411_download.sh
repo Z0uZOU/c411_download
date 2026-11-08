@@ -1718,8 +1718,10 @@ while IFS=$'\x1f' read -r media_type title guid enclosure_url tmdb_id imdb_id; d
     ########################################
     ## Checking for the presence of a local file
     local_search_names=("$filebot_name")
+    local_search_prefix=0
     if [[ "$media_type" == "series" ]]; then
       local_search_names=("$series_name - $episode_key")
+      local_search_prefix=1
     elif [[ "$tmdb_id" =~ ^[0-9]+$ ]]; then
       english_local_name=$(filebot -list --q "$tmdb_id" --db TheMovieDB --lang en \
         --filter "id == $tmdb_id" \
@@ -1735,8 +1737,8 @@ while IFS=$'\x1f' read -r media_type title guid enclosure_url tmdb_id imdb_id; d
       local_check=""
       for locate_db in "${locate_databases[@]}"; do
         for local_search_name in "${local_search_names[@]}"; do
-          local_check+=$'\n'"$(locate -i -d "$locate_db" -- "$local_search_name" 2>/dev/null | awk -v expected="$local_search_name" '
-            { name = $0; sub(/^.*\//, "", name); if (tolower(name) == tolower(expected)) print }
+          local_check+=$'\n'"$(locate -i -d "$locate_db" -- "$local_search_name" 2>/dev/null | awk -v expected="$local_search_name" -v prefix="$local_search_prefix" '
+            { name = $0; sub(/^.*\//, "", name); if ((!prefix && tolower(name) == tolower(expected)) || (prefix && index(tolower(name), tolower(expected " - ")) == 1)) print }
           ' || true)"
         done
       done
@@ -1744,8 +1746,8 @@ while IFS=$'\x1f' read -r media_type title guid enclosure_url tmdb_id imdb_id; d
     else
       local_check=""
       for local_search_name in "${local_search_names[@]}"; do
-        local_check+=$'\n'"$(locate -i -- "$local_search_name" 2>/dev/null | grep -viE '/mnt/Plex/|/\.Trash/' | awk -v expected="$local_search_name" '
-          { name = $0; sub(/^.*\//, "", name); if (tolower(name) == tolower(expected)) print }
+        local_check+=$'\n'"$(locate -i -- "$local_search_name" 2>/dev/null | grep -viE '/mnt/Plex/|/\.Trash/' | awk -v expected="$local_search_name" -v prefix="$local_search_prefix" '
+          { name = $0; sub(/^.*\//, "", name); if ((!prefix && tolower(name) == tolower(expected)) || (prefix && index(tolower(name), tolower(expected " - ")) == 1)) print }
         ' || true)"
       done
       local_check=$(printf '%s\n' "$local_check" | sed '/^$/d')
