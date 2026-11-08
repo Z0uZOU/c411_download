@@ -1717,19 +1717,38 @@ while IFS=$'\x1f' read -r media_type title guid enclosure_url tmdb_id imdb_id; d
     
     ########################################
     ## Checking for the presence of a local file
-    local_search_name="$filebot_name"
+    local_search_names=("$filebot_name")
     if [[ "$media_type" == "series" ]]; then
-      local_search_name="$series_name - $episode_key"
+      local_search_names=("$series_name - $episode_key")
+    elif [[ "$tmdb_id" =~ ^[0-9]+$ ]]; then
+      english_local_name=$(filebot -list --q "$tmdb_id" --db TheMovieDB --lang en \
+        --filter "id == $tmdb_id" \
+        --format '{n.replace("?", "").replace(":", "").replace("  ", " ")} ({y})' \
+        --log OFF 2>/dev/null | head -n 1)
+      if [[ -n "$english_local_name" ]]; then
+        english_local_name="${english_local_name}.${filebot_name##*.}"
+        [[ "$english_local_name" == "$filebot_name" ]] || local_search_names+=("$english_local_name")
+      fi
     fi
     if [[ -n "${plex_sort_folder:-}" ]]; then
       mapfile -t locate_databases < <(find "$plex_sort_folder" -maxdepth 1 -type f -name "*.locate.db" | sort)
       local_check=""
       for locate_db in "${locate_databases[@]}"; do
-        local_check+=$'\n'"$(locate -i -d "$locate_db" -- "$local_search_name" || true)"
+        for local_search_name in "${local_search_names[@]}"; do
+          local_check+=$'\n'"$(locate -i -d "$locate_db" -- "$local_search_name" 2>/dev/null | awk -v expected="$local_search_name" '
+            { name = $0; sub(/^.*\//, "", name); if (tolower(name) == tolower(expected)) print }
+          ' || true)"
+        done
       done
       local_check=$(printf '%s\n' "$local_check" | sed '/^$/d')
     else
-      local_check=$(locate -i -- "$local_search_name" | grep -viE '/mnt/Plex/|/\.Trash/' || true)
+      local_check=""
+      for local_search_name in "${local_search_names[@]}"; do
+        local_check+=$'\n'"$(locate -i -- "$local_search_name" 2>/dev/null | grep -viE '/mnt/Plex/|/\.Trash/' | awk -v expected="$local_search_name" '
+          { name = $0; sub(/^.*\//, "", name); if (tolower(name) == tolower(expected)) print }
+        ' || true)"
+      done
+      local_check=$(printf '%s\n' "$local_check" | sed '/^$/d')
     fi
     if [[ -n "$local_check" ]]; then
       local_check_file=$(printf '%s\n' "$local_check" | head -n 1)
