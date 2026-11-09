@@ -900,7 +900,7 @@ get-series-metadata() {
   series_tvdb_id=""
   series_tvdb_url=""
   movie_poster_url=""
-  metadata=$(filebot -list --q "$series_query" --db TheMovieDB::TV --format "$metadata_format" --log OFF 2>/dev/null)
+  metadata=$(filebot -list --q "$series_query" --db TheTVDB --format "$metadata_format" --log OFF 2>/dev/null)
   IFS=$'\x1f' read -r series_tvdb_id movie_poster_url <<< "${metadata%%$'\n'*}"
 
   if [[ "$series_tvdb_id" =~ ^[0-9]+$ ]]; then
@@ -908,9 +908,7 @@ get-series-metadata() {
   else
     series_tvdb_id="$(msg unavailable)"
   fi
-  if [[ "$movie_poster_url" == https://image.tmdb.org/t/p/* ]]; then
-    movie_poster_url="${movie_poster_url/\/original\//\/w500\/}"
-  else
+  if [[ "$movie_poster_url" != https://artworks.thetvdb.com/* ]]; then
     movie_poster_url=""
   fi
 }
@@ -1379,24 +1377,30 @@ normalize-series-name() {
 declare -A series_watchlist=()
 declare -A series_tmdb_watchlist=()
 declare -A series_imdb_watchlist=()
+declare -A series_tvdb_watchlist=()
+declare -A series_tmdb_to_tvdb=()
+declare -A series_imdb_to_tvdb=()
 declare -A series_title_ambiguous=()
 if (( series_enabled )); then
   if ! generate-series-watchlist "$script_folder/series_watchlist.jsonl"; then
     echo -e "$ui_tag_warning $(msg series_list_failed)"
     series_enabled=0
   else
-    while IFS=$'\x1f' read -r series_title watch_tmdb_id watch_imdb_id; do
+    while IFS=$'\x1f' read -r series_title watch_tvdb_id watch_tmdb_id watch_imdb_id; do
       series_key=$(normalize-series-name "$series_title")
       if [[ -n "$series_key" ]]; then
         if [[ -n "${series_watchlist[$series_key]:-}" ]]; then
-          series_title_ambiguous["$series_key"]=1
+          series_title_ambiguous[$series_key]=1
         else
-          series_watchlist["$series_key"]="$series_title"
+          series_watchlist[$series_key]="$series_title"
         fi
       fi
-      [[ "$watch_tmdb_id" =~ ^[0-9]+$ ]] && series_tmdb_watchlist["$watch_tmdb_id"]="$series_title"
-      [[ "$watch_imdb_id" =~ ^tt[0-9]+$ ]] && series_imdb_watchlist["$watch_imdb_id"]="$series_title"
-    done < <(jq -r '[.title, (.tmdb_id // ""), (.imdb_id // "")] | join("\u001f")' "$script_folder/series_watchlist.jsonl")
+      [[ "$watch_tvdb_id" =~ ^[0-9]+$ ]] && series_tvdb_watchlist[$watch_tvdb_id]="$series_title"
+      [[ "$watch_tmdb_id" =~ ^[0-9]+$ ]] && series_tmdb_watchlist[$watch_tmdb_id]="$series_title"
+      [[ "$watch_imdb_id" =~ ^tt[0-9]+$ ]] && series_imdb_watchlist[$watch_imdb_id]="$series_title"
+      [[ "$watch_tvdb_id" =~ ^[0-9]+$ && "$watch_tmdb_id" =~ ^[0-9]+$ ]] && series_tmdb_to_tvdb[$watch_tmdb_id]="$watch_tvdb_id"
+      [[ "$watch_tvdb_id" =~ ^[0-9]+$ && "$watch_imdb_id" =~ ^tt[0-9]+$ ]] && series_imdb_to_tvdb[$watch_imdb_id]="$watch_tvdb_id"
+    done < <(jq -r '[.title, (.tvdb_id // ""), (.tmdb_id // ""), (.imdb_id // "")] | join("\u001f")' "$script_folder/series_watchlist.jsonl")
     if ((${#series_watchlist[@]} == 0)); then
       echo -e "$ui_tag_warning $(msg series_list_empty)"
       series_enabled=0
@@ -1409,7 +1413,7 @@ fi
 echo " ----------------------------------------------------------------------------"
 
 current_processing_type=""
-while IFS=$'\x1f' read -r media_type title guid enclosure_url tmdb_id imdb_id; do
+while IFS=$'\x1f' read -r media_type title guid enclosure_url tmdb_id imdb_id tvdb_id; do
   if [[ -z "$title" || -z "$guid" || "$enclosure_url" != http://* && "$enclosure_url" != https://* ]]; then
     echo -e "$ui_tag_bad $(msg invalid_rss_item "$(media-name "$media_type")")"
     continue
@@ -1434,6 +1438,16 @@ while IFS=$'\x1f' read -r media_type title guid enclosure_url tmdb_id imdb_id; d
   torrent_file="$script_folder/torrents/$guid.torrent"
   torrent_processed=0
   torrent_skipped=0
+  rss_series_tvdb_id=""
+  if [[ "$media_type" == "series" ]]; then
+    if [[ "$tvdb_id" =~ ^[0-9]+$ ]]; then
+      rss_series_tvdb_id="$tvdb_id"
+    elif [[ "$tmdb_id" =~ ^[0-9]+$ && "${series_tmdb_to_tvdb[$tmdb_id]:-}" =~ ^[0-9]+$ ]]; then
+      rss_series_tvdb_id=${series_tmdb_to_tvdb[$tmdb_id]}
+    elif [[ "$imdb_id" =~ ^tt[0-9]+$ && "${series_imdb_to_tvdb[$imdb_id]:-}" =~ ^[0-9]+$ ]]; then
+      rss_series_tvdb_id=${series_imdb_to_tvdb[$imdb_id]}
+    fi
+  fi
   
   ########################################
   ## Check db file
@@ -1573,7 +1587,7 @@ while IFS=$'\x1f' read -r media_type title guid enclosure_url tmdb_id imdb_id; d
     fi
     temp_file="$temp_dir/$filebot_input_name"
     touch "$temp_file"
-    filebot_name_full=$(filebot --action test -script fn:amc -non-strict --conflict override --lang fr --encoding UTF-8 -rename "$temp_file" --def minFileSize=0 minLengthMS=0 --def 'seriesFormat=/SERIES/{n.replace("?", "").replace(":", "").replace("  ", " ")}/{n.replace("?", "").replace(":", "").replace("  ", " ")} - {sxe} - {t.replace("?", "").replace(":", "").replace("  ", " ")}' --def 'movieFormat=/MOVIE/{n.replace("?", "").replace(":", "").replace("  ", " ")} ({y})' --output "$temp_dir" 2>/dev/null | grep '\[TEST\]' | sed -n 's/^.* to \[\(.*\)\]$/\1/p' | head -n 1)
+    filebot_name_full=$(filebot --action test -script fn:amc -non-strict --conflict override --lang fr --encoding UTF-8 -rename "$temp_file" --def minFileSize=0 minLengthMS=0 seriesDB=TheTVDB --def 'seriesFormat=/SERIES/{n.replace("?", "").replace(":", "").replace("  ", " ")}/{n.replace("?", "").replace(":", "").replace("  ", " ")} - {sxe} - {t.replace("?", "").replace(":", "").replace("  ", " ")}' --def 'movieFormat=/MOVIE/{n.replace("?", "").replace(":", "").replace("  ", " ")} ({y})' --output "$temp_dir" 2>/dev/null | grep '\[TEST\]' | sed -n 's/^.* to \[\(.*\)\]$/\1/p' | head -n 1)
 
     filebot_retry_reason=""
     if [[ -z "$filebot_name_full" ]]; then
@@ -1598,14 +1612,14 @@ while IFS=$'\x1f' read -r media_type title guid enclosure_url tmdb_id imdb_id; d
       elif [[ -n "$filebot_retry_reason" ]]; then
         echo -e "$ui_tag_warning $(msg tmdb_multifile_skip)"
       fi
-    elif [[ "$media_type" == "series" && "$tmdb_id" =~ ^[0-9]+$ ]]; then
-      echo -e "$ui_tag_info $(msg identify_series "$tmdb_id")"
-      forced_filebot_name_full=$(filebot -rename "$temp_file" --q "$tmdb_id" --db TheMovieDB::TV --lang fr --encoding UTF-8 --action test --format '/SERIES/{n.replace("?", "").replace(":", "").replace("  ", " ")}/{n.replace("?", "").replace(":", "").replace("  ", " ")} - {sxe} - {t.replace("?", "").replace(":", "").replace("  ", " ")}' --output "$temp_dir" 2>/dev/null | sed -n 's/^.* to \[\(.*\)\]$/\1/p' | head -n 1)
+    elif [[ "$media_type" == "series" && "$rss_series_tvdb_id" =~ ^[0-9]+$ ]]; then
+      echo -e "$ui_tag_info $(msg identify_series "$rss_series_tvdb_id")"
+      forced_filebot_name_full=$(filebot -rename "$temp_file" --q "$rss_series_tvdb_id" --db TheTVDB --lang fr --encoding UTF-8 --action test --format '/SERIES/{n.replace("?", "").replace(":", "").replace("  ", " ")}/{n.replace("?", "").replace(":", "").replace("  ", " ")} - {sxe} - {t.replace("?", "").replace(":", "").replace("  ", " ")}' --output "$temp_dir" 2>/dev/null | sed -n 's/^.* to \[\(.*\)\]$/\1/p' | head -n 1)
       if [[ "$forced_filebot_name_full" == */SERIES/*/* ]]; then
         filebot_name_full="$forced_filebot_name_full"
         echo -e "$ui_tag_ok $(msg filebot_series_found "$(basename "$filebot_name_full")")"
       else
-        echo -e "$ui_tag_warning $(msg filebot_series_failed "$tmdb_id")"
+        echo -e "$ui_tag_warning $(msg filebot_series_failed "$rss_series_tvdb_id")"
       fi
     fi
     rm -rf "$temp_dir"
@@ -1627,7 +1641,9 @@ while IFS=$'\x1f' read -r media_type title guid enclosure_url tmdb_id imdb_id; d
       series_name=$(basename "$(dirname "$filebot_name_full")")
       series_key=$(normalize-series-name "$series_name")
       tracked_series_name=""
-      if [[ "$tmdb_id" =~ ^[0-9]+$ && -n "${series_tmdb_watchlist[$tmdb_id]:-}" ]]; then
+      if [[ "$rss_series_tvdb_id" =~ ^[0-9]+$ && -n "${series_tvdb_watchlist[$rss_series_tvdb_id]:-}" ]]; then
+        tracked_series_name=${series_tvdb_watchlist[$rss_series_tvdb_id]}
+      elif [[ "$tmdb_id" =~ ^[0-9]+$ && -n "${series_tmdb_watchlist[$tmdb_id]:-}" ]]; then
         tracked_series_name=${series_tmdb_watchlist[$tmdb_id]}
       elif [[ "$imdb_id" =~ ^tt[0-9]+$ && -n "${series_imdb_watchlist[$imdb_id]:-}" ]]; then
         tracked_series_name=${series_imdb_watchlist[$imdb_id]}
@@ -1682,8 +1698,8 @@ while IFS=$'\x1f' read -r media_type title guid enclosure_url tmdb_id imdb_id; d
         movie_tmdb_id="$(msg unavailable)"
         movie_tmdb_url=""
       fi
-      if [[ "$tmdb_id" =~ ^[0-9]+$ ]]; then
-        get-series-metadata "$tmdb_id"
+      if [[ "$rss_series_tvdb_id" =~ ^[0-9]+$ ]]; then
+        get-series-metadata "$rss_series_tvdb_id"
       else
         get-series-metadata "$series_name"
       fi
@@ -1721,6 +1737,14 @@ while IFS=$'\x1f' read -r media_type title guid enclosure_url tmdb_id imdb_id; d
     local_search_prefix=0
     if [[ "$media_type" == "series" ]]; then
       local_search_names=("$series_name - $episode_key")
+      local_tracked_series_name=${tracked_series_name//\?/}
+      local_tracked_series_name=${local_tracked_series_name//:/}
+      while [[ "$local_tracked_series_name" == *"  "* ]]; do
+        local_tracked_series_name=${local_tracked_series_name//  / }
+      done
+      if [[ -n "$local_tracked_series_name" && "$local_tracked_series_name" != "$series_name" ]]; then
+        local_search_names+=("$local_tracked_series_name - $episode_key")
+      fi
       local_search_prefix=1
     elif [[ "$tmdb_id" =~ ^[0-9]+$ ]]; then
       english_local_name=$(filebot -list --q "$tmdb_id" --db TheMovieDB --lang en \
@@ -2220,6 +2244,8 @@ done < <(
       -v 'torznab:attr[@name="tmdbid"]/@value' \
       -o $'\x1f' \
       -v 'torznab:attr[@name="imdbid"]/@value' \
+      -o $'\x1f' \
+      -v 'torznab:attr[@name="tvdbid"]/@value' \
       -n \
       "$current_rss_file"
   done
